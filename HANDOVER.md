@@ -34,10 +34,10 @@
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | **M1** | 固定会话注入 + 显式 resume + 唤醒策略 + 出站采集 + 调试工具 | ✅ **已完成，且曾在真实 host 中实测通过** |
-| **M2** | OneBot(NapCat) 传输层：入站 → `handleInbound()`，出站 → `sendToQQ()` | ⛔ **未开始**（`sendToQQ()` 目前只打日志） |
+| **M2** | OneBot(NapCat) 传输层：入站 → `handleInbound()`，出站 → `sendToQQ()` | ✅ **已完成**（`onebot.js`，离线端到端实测通过；⚠️ **尚未对真实 NapCat 联调**） |
 | **M3** | 设置界面（昵称 / 白名单 / 概率 / 目标会话 / 唤醒日志） | ⛔ **未开始** |
 | — | 插件在 profile 中的安装 | ⚠️ **已被用户卸载**（源码保留在本目录，可随时重装） |
-| — | 离线冒烟测试 | ✅ `node test-smoke.mjs` 全绿（含 5.05% 概率实测） |
+| — | 离线测试 | ✅ `node test-smoke.mjs`（策略分支，全绿）+ `node test-onebot.mjs`（M2 端到端，全绿） |
 
 > 卸载是用户的决定（当时 DSH 新版不稳定、不想叠加变量），**不是代码不可用**。M1 曾通过 `qq_bridge_status` / `qq_bridge_simulate` 两个工具在运行中的 host 内跑通三条分支。
 
@@ -47,13 +47,17 @@
 
 | 文件 | 大小 | 作用 |
 |---|---|---|
-| `index.js` | ~15.9 KB | **host 半主体**（全部 M1 逻辑） |
-| `cordis.patch.yml` | ~1.3 KB | bundle 挂载声明 + 安装期默认配置（composition base） |
-| `package.json` | ~0.5 KB | 包声明：`name=dsh-qq-bridge`、`type=module`、`dsh.bundle.patch` |
-| `DESIGN.md` | ~5.5 KB | 设计草案：与现有 QQ 插件的区别、唤醒策略、接口表、设置项、里程碑、安全注意 |
-| `README.md` | ~3.1 KB | 安装/使用说明，含本地 `link:` 安装的依赖解析坑与解法 |
-| `test-smoke.mjs` | ~3.3 KB | **离线冒烟测试**（假 ctx 直接调 `apply()`） |
-| `node_modules\@deepseek-ai` | junction | 本地安装时让 `import '@deepseek-ai/...'` 能解析（见 §7 坑 1） |
+| `index.js` | ~30 KB | **host 半主体**：M1 全部逻辑 + M2 的接入（配置、入站映射、出站分段、调试工具） |
+| `onebot.js` | ~12 KB | **M2 传输层**：内置 WebSocket 连接管理、退避重连、心跳看门狗、action/echo 收发 |
+| `cordis.patch.yml` | ~2.4 KB | bundle 挂载声明 + 安装期默认配置（composition base，含 M2 键） |
+| `package.json` | ~0.9 KB | 包声明：`name=dsh-qq-bridge`、`type=module`、`dsh.bundle.patch` |
+| `DESIGN.md` | ~9 KB | 设计草案：与现有 QQ 插件的区别、唤醒策略、接口表、设置项、里程碑、安全注意 |
+| `README.md` | ~6 KB | 安装/使用说明，含 OneBot 接入、access_token 配置、依赖解析坑与解法 |
+| `test-smoke.mjs` | ~4 KB | **离线冒烟测试**（假 ctx 直接调 `apply()`，覆盖策略分支） |
+| `test-onebot.mjs` | ~14 KB | **M2 端到端测试**：内置最小 OneBot WS 服务器（手写 RFC 6455，不依赖 `ws`） |
+| `LICENSE` | ~1 KB | MIT，Copyright (c) 2026 sj244 |
+| `node_modules\@deepseek-ai` | junction | 本地安装时让 `import '@deepseek-ai/...'` 能解析（见 §7 坑 1）；**已 gitignore** |
+| `HANDOVER.local.md` | — | **未脱敏**的原始交接文档（含真实会话 id / 本机路径 / 群号），**只在本机，已 gitignore** |
 
 ---
 
@@ -112,19 +116,24 @@ async function ensureTargetAgent() {
   （不 resume、不报错）。结果就是"给 A 会话排的定时任务被投进了 B 会话"——本项目用户真实踩过。
 - 持有 `AgentHandle`，并在 `ctx.effect(() => () => { handle.dispose() })` 里清理。
 
-### 4.4 出站采集（M2 的接入点）
+### 4.4 出站采集 → QQ（M2 已接好）
 
 ```js
 ctx.on('session/event', (session, event) => {
   if (session?.id !== targetSessionId) return
-  if (event.type === 'assistant/message') { 累积文本 }
+  if (event.type === 'assistant/message') { 累积文本到 pendingReply }
   if (event.type === 'turn/end')           { 落 state.outbox → sendToQQ(text) }
 })
 ```
 
-- `sendToQQ(text)` 目前是**桩**：只 `logger.info`，不发送。
-- ⚠️ **M2 必须扩展它**：现在只传 `text`，不传目标（私聊/群）。实现时要么改成
-  `sendToQQ(destination, text)`，要么在 `state` 里记住"最后一次入站的会话目的地"。
+- `sendToQQ(text, destination?)` **已经是真实发送**（不再是桩）：
+  目的地默认取 `state.lastDestination`（入站时记住的**最后一次来源**，持久化），
+  也可以用参数显式指定；私聊发 `send_private_msg`、群发 `send_group_msg`。
+- 按 `replyMaxChars`（下限 100）分段；`replyWithQuote` 时**首段**带 reply 段引用触发消息。
+- **连不上或还没有目的地时丢弃并记日志**（不静默排队堆积）。
+- ⚠️ `assistant/message` 事件可能带**顶层** `surfaceOp`（`{op:'replace', startSeq, endSeq}`）；
+  那时这条是「替换」而不是「追加」，继续累加会重复，所以直接重算为当前这条。
+- ⚠️ 出站只带文本段。工具调用、思考过程不会发出去。
 
 ### 4.5 状态持久化
 
@@ -148,18 +157,30 @@ ctx.on('session/event', (session, event) => {
 | `wakeProbability` | `0.05` | 非昵称消息唤醒概率 |
 | `whitelist` / `groupWhitelist` | `[]` | 私聊 / 群白名单（**空 = 全拒**） |
 | `attachRecentChat` / `recentChatLimit` | `true` / `20` | 未唤醒聊天是否附给下次唤醒、条数 |
-| `replyMaxChars` | `1500` | 出站分段上限（M2 用） |
+| `replyMaxChars` | `1500` | 出站分段上限（下限 100） |
+| `onebotUrl` | `''` | NapCat 正向 WS 地址；**空 = 不启用传输** |
+| `accessTokenEnv` | `''` | access_token 的**凭据引用名**（`role('credential-ref')`），不放明文 |
+| `selfId` | `''` | 自己的 QQ 号；空 = 连上后 `get_login_info` 自动取 |
+| `replyWithQuote` | `false` | 首段带 `[CQ:reply]` 引用触发消息 |
+| `atOnlyInGroup` | `false` | 群里只有被 @ 才处理（比概率唤醒更严的闸门） |
+| `stripMarkdown` | `true` | 出站去掉 Markdown 标记（QQ 不渲染） |
 
-Config（`cordis.patch.yml`）另有：`agentPreset`（resume 时挂载的 preset，留空则沿用会话 header）、`statePath`、`debugTools`。
+Config（`cordis.patch.yml`）另有：`agentPreset`（resume 时挂载的 preset，留空则沿用会话 header）、
+`statePath`、`debugTools`、`heartbeatTimeoutMs`（无 WS 流量多久判定断线，默认 90000）。
 
 > ⚠️ **当前 patch 里的白名单是测试值 `test-user`**，正式使用必须换成真实 QQ openid。
 
 ### 4.7 调试工具（`debugTools: true` 时注册）
 
-- `qq_bridge_status` —— 打印设置、目标会话是否已加载、缓冲条数、最近唤醒日志、待发文本。
+- `qq_bridge_status` —— 设置、目标会话是否已加载、**OneBot 连接状态**、目的地、缓冲条数、
+  最近唤醒日志、待发文本、state 路径。
+- `qq_bridge_send` —— **（M2 新增）** 立刻发一条消息，不经过目标会话；
+  可指定 `userId` / `groupId`，都不给则用最后一次入站目的地。**验证出站最直接的手段。**
+- `qq_bridge_transport` —— **（M2 新增）** 看连接状态（含 `accessTokenEnv` 是否解析到 token），
+  或 `action: 'reconnect'` 强制重连。
 - `qq_bridge_simulate` —— 模拟一条入站消息走完整策略；`dryRun: true` 只返回决策、不注入。
 
-这两个工具是 M1 的验证手段，**保留**；M2 接好真实传输后可继续用于排障。
+这些工具是排障主力，**保留**。
 
 ---
 
@@ -167,15 +188,20 @@ Config（`cordis.patch.yml`）另有：`agentPreset`（resume 时挂载的 prese
 
 | 用途 | 接口 | 出处 |
 |---|---|---|
-| 构造用户消息 | `createUserMessage({ content, source })` | `@deepseek-ai/dsh-llm` |
-| 唤醒一轮 | `agent.followup(msg)` | `@deepseek-ai/dsh-agent` types（`runtime-types.d.ts` 约 118 行）/ `dsh-agent-loop` |
-| 只喂上下文不唤醒 | `agent.inject(msg)` | 同上（约 135 行） |
-| 取/列会话 | `ctx.agents.get(id)`、`ctx.agents.roots()` | `agents` 服务 |
+| 构造用户消息 | `createUserMessage({ content, source })` | `@deepseek-ai/dsh-llm`（`lib/types/message.d.ts`） |
+| 唤醒一轮 | `agent.followup(msg)` | `@deepseek-ai/dsh-agent`（`lib/types/runtime-types.d.ts` 约 192 行） |
+| 只喂上下文不唤醒 | `agent.inject(msg)` | 同上（约 209 行）—— **当前未使用** |
+| 发起者归属 | `ctx.agents.withInitiator(agent, op)`；另有 `currentInitiator()` / `requireInitiator()` | `agents` 服务（rc3 起） |
+| 取/列会话 | `ctx.agents.get(id)`、`ctx.agents.roots()`、`ctx.agents.list()` | `agents` 服务 |
 | 显式加载会话 | `await ctx.agents.resume({ resumeSessionId, agentOptions?, signal?, setup? })` → `AgentHandle{agent, dispose()}` | `agents` 服务 |
-| 出站事件 | `ctx.on('session/event', (session, event) => …)`；事件信封 `{type, seq, time, data}` | `session/event`（emit 模式） |
-| 出站事件类型 | `assistant/message`（`data.message`，content blocks）、`turn/end`（`data.reason.kind`）、`user/message`（`data.id`） | 同上 |
+| 出站事件 | `ctx.on('session/event', (session, event) => …)`；事件信封 `{type, seq, time, data, surfaceOp?}` | `session/event`（emit 模式） |
+| 出站事件类型 | `assistant/message`（`data.message`）、`turn/end`（`data.reason.kind`）、`user/message`、`tool/result` | 同上 |
 | 设置 | `ctx.settings.register(ns, schema, { base, applies:'live' })`、`ctx.settings.get(ns)` | `settings` 服务 |
 | 注册工具 | `ctx.tools.register(defineTool({ name, description, parameters, output:{schema,render}, execute }))` | `@deepseek-ai/dsh-tools` |
+| **M2 · WS 客户端** | 全局 `WebSocket`（Node ≥ 22，WHATWG 接口：`onopen/onmessage/onclose/onerror`、`send`、`close`、`readyState`）。**构造函数只收 `(url, protocols)`，不能传请求头** → `access_token` 走查询串 | Node 内置，零依赖 |
+| **M2 · 凭据** | `ctx.get('credentials').resolve(ref)` → `{value, source} \| undefined`；`ref` 是**环境变量名**（`CredentialRef`）。**每次操作重新解析，不得缓存** | `credentials` 服务 |
+| **M2 · 出站 action** | `{action:'send_private_msg', params:{user_id, message}, echo}` / `send_group_msg` + `group_id`；回包按 `echo` 配对，`retcode===0` 为成功 | OneBot v11 |
+| **M2 · 元数据 action** | `get_login_info`（拿 `self_id`）、`get_group_info`（拿群名） | OneBot v11 |
 | 设置界面（M3） | client 半注册 Slot **`settings.section`**（list，注册项 `{id, order, label}`）；另有 `settings.plugin.item` / `settings.general.item` | 客户端 Slot 树 |
 
 插件基本形态（与 `dsh-cron` 一致）：
@@ -191,9 +217,16 @@ export function apply(ctx, config) { /* … */ }
 
 ---
 
-## 6. 下一步实现计划
+## 6. 实现计划与进度
 
-### M2 —— OneBot（NapCat）传输层【建议的接入点】
+### M2 —— OneBot（NapCat）传输层 ✅ **已实现**
+
+> 代码：传输层在 **`onebot.js`**，接入（配置 / 入站映射 / 出站分段 / 工具）在 `index.js`。
+> 下面的编号清单是**当初的计划**，已按此实现；与原计划只有两处差异：
+> ① **token 走查询串** `?access_token=…` 而不是请求头——Node 内置的 WHATWG WebSocket
+> **不支持自定义请求头**，Body/Bearer 那条路走不通；
+> ② 只实现了 **WS 客户端**形态，HTTP + 反向回调没做（也不需要）。
+> **剩余未做：对真实 NapCat 联调**（本机没装/没跑 NapCat，只有离线端到端测试）。
 
 **推荐形态**：插件作为 **WebSocket 客户端**连到 NapCat 的 forward WS（如 `ws://127.0.0.1:3001`，带 `access_token`）。
 （也可用 HTTP + 反向回调，但 WS 更省事、事件更及时。）
@@ -288,6 +321,26 @@ export function apply(ctx, config) { /* … */ }
 
 7. **用户经常分叉（fork）会话** —— 见 §9，`targetSessionId` 会被"冻结"在旧会话上，需要提醒用户更新。
 
+8. **`dsh` 命令必须用 `dsh.cmd`（Windows）**
+   PowerShell 执行策略会拦截 `dsh.ps1`，直接敲 `dsh` 报 `UnauthorizedAccess` / `PSSecurityException`。
+   用 **`dsh.cmd`**，或直接 `node <npx缓存>\...\@deepseek-ai\dsh\lib\bin.js`。
+   另外：`dsh --profile web --help` 给的是 **web app 自己的**帮助；launcher 级选项
+   （`--version` / `--dump-config`）要看 `dsh --help`。`dsh plugin ...` 其实是 **pnpm 的包装**。
+
+9. **agent 侧 `git push/pull` 在沙箱里走不通 HTTPS**
+   报 `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` —— 连公开仓库的
+   `git ls-remote` 都会失败（所以**不是**凭据问题，是 TLS 取不到加密句柄）；
+   换 `-c http.sslBackend=openssl` 则撞上沙箱**禁止命名管道**（`sh.exe: couldn't create signal pipe,
+   Win32 error 5`），凭据助手起不来，于是退回「terminal prompts disabled」失败。
+   → 该命令需要更宽的执行权限。另外**推送不稳定是常态**（用户原话：「我推 GitHub 有时候也需要推好几次」），
+   写成**循环重试**（8–10 次 + 几秒间隔）比单次调用有效。
+   ⚠️ 推送失败时别只想网络：`error: failed to push some refs` 是**非快进拒绝**，
+   说明远端被谁（比如用户在网页上）推进了 —— 先 `git fetch` 看分叉，再 `git rebase origin/main`。
+
+10. **不要给插件引入 `ws` 依赖**
+    插件目录只挂了 `@deepseek-ai` 一个 junction，`ws` 从这里解析不到（`ERR_MODULE_NOT_FOUND`）。
+    用 Node ≥ 22 的内置全局 `WebSocket`（零依赖）。注意它是 WHATWG 接口、**不能传请求头**。
+
 ---
 
 ## 8. 验证手册（改完照这个顺序验）
@@ -295,9 +348,11 @@ export function apply(ctx, config) { /* … */ }
 ```powershell
 # 1) 语法
 node --check index.js
+node --check onebot.js
 
-# 2) 离线冒烟（策略分支 + 工具注册）
-node test-smoke.mjs            # 期望 ALL PASS，概率实测 ≈5%
+# 2) 离线测试（都要 ALL PASS）
+node test-smoke.mjs            # 策略分支 + 工具注册；概率实测 ≈5%
+node test-onebot.mjs           # M2 端到端：内置最小 OneBot WS 服务器，覆盖收发全链路
 
 # 3) 从 profile 里做加载检查
 cd "$env:USERPROFILE\.dsh\profiles\web"
@@ -305,11 +360,13 @@ node -e "import('dsh-qq-bridge').then(m=>console.log(m.name, JSON.stringify(m.in
 # 期望：qq-bridge ["agents","tools","settings"]
 
 # 4) 安装 + 组合检查
-dsh plugin --profile web add "<REPO>"
+dsh plugin --profile web add "<REPO>"          # ⚠️ 用 dsh.cmd，别用 dsh（见 §7 坑 8）
 dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # == dsh-qq-bridge
 # 5) 重启 dsh web 后，在会话里调用调试工具：
-#    qq_bridge_status                → 看设置 / 目标会话是否加载
-#    qq_bridge_simulate {dryRun:true} → 只看决策，不消耗 token
+#    qq_bridge_status                    → 设置 / 目标会话 / OneBot 连接状态
+#    qq_bridge_transport                 → 连接状态 + token 是否解析到
+#    qq_bridge_simulate {dryRun:true}    → 只看决策，不消耗 token
+#    qq_bridge_send {text:'hi'}          → 直接测出站（需要 NapCat 已连上）
 #    qq_bridge_simulate {userId:'<白名单内>', text:'…'}  → 真正唤醒一轮（会花 token）
 ```
 
@@ -348,19 +405,40 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 
 ---
 
-## 11. 附：核心代码索引（`index.js`）
+## 11. 附：核心代码索引
+
+### `index.js`
 
 | 位置（函数） | 作用 |
 |---|---|
-| `apply(ctx, config)` | 入口：注册 settings、状态、事件、工具 |
+| `apply(ctx, config)` | 入口：注册 settings、状态、传输、事件、工具 |
 | `readSettings()` | 合并 settings 命名空间解析值与默认值 |
 | `normalize()` / `mentionsNickname()` | 昵称匹配（归一化后包含判断） |
 | `isAllowed()` | 白名单 fail-closed 判定 |
 | `decide(msg, settings, random)` | **纯函数策略**（drop/wake/record），测试入口 |
 | `ensureTargetAgent()` | `agents.get` → `agents.resume`，**绝不回退** |
-| `handleInbound(msg)` | **入站总入口**（M2 直接调它） |
+| `handleInbound(msg)` | **入站总入口**（OneBot 传输与调试工具都调它） |
+| `rememberDestination(msg)` | **M2**：记住最后一次来源，出站回复用它当目的地 |
 | `renderInbound()` / `renderDigest()` | 唤醒消息渲染（含未唤醒聊天摘要） |
 | `messageText()` | 从 assistant content blocks 抽文本 |
-| `sendToQQ(text)` | **M2 要替换的桩** |
-| `loadState()` / `saveState()` / `pushLog()` | 状态持久化 |
-| `qq_bridge_status` / `qq_bridge_simulate` | 调试工具 |
+| `resolveAccessToken()` | **M2**：每次建连经 `ctx.credentials` 重新解析 token |
+| `handleOneBotEvent(event)` | **M2**：OneBot 事件入口（过滤自身消息 / 元事件） |
+| `mapOneBotMessage(event, selfId)` | **M2**：OneBot 事件 → `handleInbound` 的 msg（兼容 array/string） |
+| `loadGroupName(groupId)` | **M2**：懒加载群名（失败不影响策略） |
+| `stripMarkdown(text)` | **M2**：出站前去掉 Markdown 标记 |
+| `chunkText(text, limit)` | **M2**：按码点分段，优先在换行处断 |
+| `sendToQQ(text, destination?)` | **M2 已实现**：真实发到 OneBot（私聊/群），分段 + 可选引用 |
+| `loadState()` / `saveState()` / `pushLog()` | 状态持久化（含 `lastDestination` / `lastMessageId`） |
+| `qq_bridge_status` / `qq_bridge_send` / `qq_bridge_transport` / `qq_bridge_simulate` | 调试工具 |
+
+### `onebot.js`（M2 传输层）
+
+| 位置（函数） | 作用 |
+|---|---|
+| `createOneBotTransport(options)` | 建传输实例（唯一持有的对象，副作用全归 `dispose()`） |
+| `connect()` | 解析 url/token → 拼 `?access_token=` → 建 WS → 挂事件 |
+| `scheduleReconnect()` | 指数退避 + 抖动（1s→30s），带重连计数 |
+| `armWatchdog()` / `clearWatchdog()` | 心跳看门狗：`heartbeatTimeoutMs` 无流量即强制重连 |
+| `call(action, params)` | 发 action 并按 `echo` 等回包（带超时）；未连接直接 reject |
+| `dispose()` | 清所有定时器、关闭连接、reject 待决调用（可重复调用） |
+| `status()` | 连接状态快照（state/url/selfId/reconnects/收发计数） |

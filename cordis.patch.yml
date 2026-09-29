@@ -9,15 +9,35 @@
         targetSessionId: '<TARGET_SESSION_ID>'
         # 可选：resume 目标会话时挂载的 agent preset（留空则沿用会话 header 里记录的）。
         agentPreset: ''
-        # 状态文件（最近聊天缓冲 + 唤醒日志）。留空 = $DSH_HOME/qq-bridge-state.json
+        # 状态文件（最近聊天缓冲 + 唤醒日志 + 出站目的地）。留空 = $DSH_HOME/qq-bridge-state.json
         statePath: ''
-        # 注册 qq_bridge_status / qq_bridge_simulate 两个调试工具（M1 验证用）。
+        # 注册 qq_bridge_status / qq_bridge_send / qq_bridge_transport / qq_bridge_simulate
+        # 四个调试工具（排障用，正式环境可关）。
         debugTools: true
-        # ↓ 这几项是 settings 命名空间 qq-bridge 的默认值（设置界面可覆盖）
+
+        # ── M2：OneBot 传输（NapCat / go-cqhttp）─────────────────────────────
+        # NapCat 的「正向 WebSocket」地址；**留空 = 完全不启用传输**（默认安全）。
+        onebotUrl: ''
+        # 存放 access_token 的**凭据引用名**（就是一个环境变量名），不要明文写 token。
+        # 它会经 ctx.credentials 解析（进程环境 → 凭据存储 → .env），每次建连重新解析。
+        # 设置方式见 README「配置 access_token」。
+        accessTokenEnv: ''
+        # 机器人自己的 QQ 号；留空则连上后自动调 get_login_info 获取。
+        selfId: ''
+        # 回复时引用触发的那条消息（[CQ:reply]）。
+        replyWithQuote: false
+        # 群里只有被 @ 才处理（比概率唤醒更严的一道闸门）。
+        atOnlyInGroup: false
+        # 出站前去掉 Markdown 标记（QQ 不渲染，留着只是噪音）。
+        stripMarkdown: true
+        # 多久没有任何 WS 流量就判定连接已死并重连。
+        heartbeatTimeoutMs: 90000
+
+        # ↓ 以下几项是 settings 命名空间 qq-bridge 的默认值（设置界面可覆盖）
         nicknames: ['244', '猫猫']
         # 非昵称消息的唤醒概率（5%）
         wakeProbability: 0.05
         # ⚠️ 白名单 fail-closed：空数组 = 谁都不能唤醒。
-        # 'test-user' 是 M1 自测用的假 id，正式使用请换成你自己的 QQ openid。
+        # 'test-user' 是自测用的假 id，正式使用请换成你自己的 QQ openid。
         whitelist: ['test-user']
         groupWhitelist: []
