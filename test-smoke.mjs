@@ -27,6 +27,10 @@ const config = {
   agentPreset: '',
   statePath: process.env.TEMP + '/qq-bridge-smoke.json',
   debugTools: true,
+  // ⚠️ 必须显式指向一个**不存在**的目录：否则测试结果会依赖本机
+  // $DSH_HOME/napcat 的真实状态（那里装过 NapCat 的话，"未安装时 launch 报错"
+  // 这条断言就会走到下一个分支而失败）。
+  napcatInstallDir: process.env.TEMP + '/qq-bridge-smoke-napcat-absent',
   nicknames: ['244', '猫猫'],
   wakeProbability: 0.05,
   whitelist: ['test-user'],
