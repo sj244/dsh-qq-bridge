@@ -3,7 +3,7 @@
 //  (2) 唤醒策略三条分支（白名单外丢弃 / 昵称必唤醒 / 其余按概率）；
 // 运行：node test-smoke.mjs
 import { existsSync, rmSync } from 'node:fs'
-import { apply, extractQQReply, truncateText } from './index.js'
+import { apply, extractQQReply, labelForSegment, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -146,6 +146,23 @@ if (sim) {
   for (let i = 0; i < 210; i++) await sim.execute({ text: `灌水第${i}条`, userId: 'test-user' })
   const st2 = JSON.parse(await status.execute({}))
   check('缓冲条数封顶 200', st2.bufferedUnwoken === 200, `实际 ${st2.bufferedUnwoken}`)
+}
+
+// 表情包 / 非文本段：**绝不能变成空字符串**，否则整条消息会被上层丢掉
+{
+  check('表情 → 有占位符', labelForSegment('face', { id: 4 }) === '[表情4]')
+  check('表情包(mface) → 用 summary', labelForSegment('mface', { summary: '[动画表情]' }) === '[表情包:[动画表情]]')
+  check('表情包无 summary → 兜底', labelForSegment('mface', {}) === '[表情包]')
+  check('图片 → 占位符', labelForSegment('image', {}) === '[图片]')
+  check('语音 → 占位符', labelForSegment('record', {}) === '[语音]')
+  check('文件 → 带文件名', labelForSegment('file', { name: 'a.zip' }) === '[文件:a.zip]')
+  check('合并转发 → 占位符', labelForSegment('forward', {}) === '[合并转发]')
+  check('纯元数据段 reply → 跳过', labelForSegment('reply', {}) === '')
+  check(
+    '关键：每个已知非文本段都不是空串',
+    ['face', 'mface', 'image', 'record', 'video', 'file', 'json', 'xml', 'forward', 'poke', 'location', 'music']
+      .every((t) => labelForSegment(t, {}) !== ''),
+  )
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)

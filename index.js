@@ -114,6 +114,38 @@ const BridgeSettings = Schema.object({
   qqNumber: Schema.string().default(''),
 })
 
+/** OneBot 非文本消息段 → 可读占位符。
+ *  **绝不让整条消息因为"全是非文本段"而变成空字符串** —— 那样会被上层直接丢掉，
+ *  用户发个表情包就等于什么都没发生。纯元数据段（reply/rps/dice）返回 undefined = 跳过。
+ *  @type {Record<string, string | ((data: any) => string) | undefined>} */
+const SEGMENT_LABELS = {
+  face: (d) => (d?.id !== undefined ? `[表情${d.id}]` : '[表情]'),
+  mface: (d) => (d?.summary ? `[表情包:${d.summary}]` : '[表情包]'),
+  image: '[图片]',
+  record: '[语音]',
+  video: '[视频]',
+  file: (d) => (d?.name ? `[文件:${d.name}]` : '[文件]'),
+  json: '[卡片]',
+  xml: '[卡片]',
+  markdown: '[富文本]',
+  forward: '[合并转发]',
+  poke: '[戳一戳]',
+  shake: '[窗口抖动]',
+  location: '[位置]',
+  music: '[音乐]',
+  contact: '[推荐联系人]',
+  reply: undefined,
+  rps: undefined,
+  dice: undefined,
+}
+
+/** 把一段 CQ 码段名映射成占位符（string 形态的 message 用）。导出是为了可测试。 */
+export function labelForSegment(type, data) {
+  const label = SEGMENT_LABELS[type]
+  if (label === undefined) return ''
+  return typeof label === 'function' ? label(data) : label
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function apply(ctx, config) {
@@ -491,11 +523,18 @@ export function apply(ctx, config) {
       for (const seg of message) {
         const type = seg?.type
         const data = seg?.data ?? {}
-        if (type === 'text') parts.push(String(data.text ?? ''))
-        else if (type === 'at') {
+        if (type === 'text') {
+          parts.push(String(data.text ?? ''))
+          continue
+        }
+        if (type === 'at') {
           if (selfId !== '' && String(data.qq) === selfId) atSelf = true
-        } else if (type === 'face') parts.push(`[表情${data.id ?? ''}]`)
-        else if (type === 'image') parts.push('[图片]')
+          else if (data.qq) parts.push(`@${data.qq} `)
+          continue
+        }
+        // 其余段都给个占位符：表情包、语音、视频、文件、卡片……都不能让消息凭空消失。
+        const label = labelForSegment(type, data)
+        if (label !== '') parts.push(label)
       }
       text = parts.join('')
     } else {
@@ -504,9 +543,8 @@ export function apply(ctx, config) {
       if (selfId !== '' && new RegExp(`\\[CQ:at,qq=${selfId}(?:,[^\\]]*)?\\]`).test(raw)) atSelf = true
       text = raw
         .replace(/\[CQ:at,qq=([^,\]]+)(?:,[^\]]*)?\]/g, (_m, qq) => (selfId !== '' && String(qq) === selfId ? '' : `@${qq} `))
-        .replace(/\[CQ:face,[^\]]*\]/g, '[表情]')
-        .replace(/\[CQ:image,[^\]]*\]/g, '[图片]')
-        .replace(/\[CQ:[^\]]*\]/g, '')
+        .replace(/\[CQ:([a-z_]+)(?:,[^\]]*)?\]/g, (_m, key) => labelForSegment(key, null))
+        .trim()
     }
 
     return {

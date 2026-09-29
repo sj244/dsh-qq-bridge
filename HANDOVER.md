@@ -477,6 +477,95 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 | `detectQq()` | 只读地找 QQ 安装位置（不碰用户的 QQ） |
 | `defaultInstallDir(home)` / `napcatPaths(dir)` / `isNapcatInstalled(dir)` | 路径与安装状态 |
 
+---
+
+## 12. 真机联调实录（2026-09-30）—— **M2 已在真实 NapCat + 真实 QQ 上跑通**
+
+### 12.1 结论先行：**不需要从腾讯下载 QQ**
+
+之前以为必须走 OneKey 安装器（它硬编码的 QQ 地址已 404）。实际上：
+
+- **机器上已有的 QQ 就能用**。`E:\QQ1\QQ.exe` 显示 `9.9.19.35469` 只是**启动器壳**；
+  真正的运行时在 `E:\QQ1\versions\9.9.36-53644\`（`QQNT.dll` 200+ MB）。
+- **NapCat v4.18.28 能注入 QQ 9.9.36**，尽管它 `qqnt.json` 声明的是 `9.9.22-40990`。
+  → 「NapCat 与 QQ 必须精确版本匹配」**是错的**，别再为此绕路。
+
+### 12.2 已验证可用的「零 CDN 依赖」部署流程
+
+```
+1. 下载 NapCat.Shell.zip（GitHub 镜像 ghfile.geekertao.top；被限速时 curl -C - 续传即可恢复满速）
+   校验 sha256（Release API 的 asset.digest）
+2. 解包到任意目录（本机：C:\Users\zrl\.dsh\napcat\NapCat.Shell\）
+3. 预写 config/onebot11.json —— 正向 WS 服务端 127.0.0.1:3001、reportSelfMessage=false
+   再写 config/webui.json、config/napcat.json（fileLog:true, fileLogLevel:debug 便于排障）
+4. **让用户自己双击 launcher-win10.bat**（会弹 UAC）→ NapCat 拉起无头 QQ 并注入
+5. 用户在 http://127.0.0.1:6099/webui 扫码登录（token 看 NapCat 控制台窗口）
+6. 登录成功后 NapCat 自动按 onebot11.json 在 3001 开正向 WS → 插件连上即可
+```
+
+- `launcher.bat` / `launcher-win10.bat` 逻辑：**必须管理员**（`net session` 检测 + `Start-Process -Verb runAs` 自我提权）
+  → 从注册表 `HKLM\SOFTWARE\WOW6432Node\...\Uninstall\QQ` 的 `UninstallString`（本机 `E:\QQ1\Uninstall.exe`）
+  解析出 `QQ.exe` → `NapCatWinBootMain.exe "<QQ.exe>" "<hook.dll>" [-q QQ号]`。
+  **Windows 10 用 `launcher-win10.bat`**（`launcher.bat` 依赖 `wt.exe`）。
+- **预先写的 `config/webui.json` 里的 token 不生效**，真 token 要看 NapCat 控制台窗口。
+
+### 12.3 ⚠️ 两条硬教训（下次别再踩）
+
+1. **服务不能挂在 agent 的进程树上。**
+   我用 pwsh 的 `Start-Process` 拉起 NapCat → 用户一中断我的会话、或我的工具调用被 abort，
+   pwsh 作业被关，**NapCat 和它注入的 QQ 一起死**。
+   （当时用户误判成"网络问题登不上号"，真相是这个。）
+   → **长期运行的服务一律让用户自己启动**，与 agent 会话解耦。
+
+2. **改插件代码后，运行中的宿主不会自动用新代码（ESM 模块缓存）。**
+
+   | 做法 | 结果 |
+   |---|---|
+   | 摘掉 profile patch 的 insert 行再加回 | ❌ 只重跑 `apply()`，`import` 命中缓存 |
+   | 换个 junction 名字指向同一份源码 | ❌ **Node 会把 junction 解析回 realpath**，模块 URL 不变 |
+   | **复制到真实的另一个目录** | ✅ 有效 |
+   | 重启 `dsh web` | ✅ 有效（但打断当前会话） |
+
+   本 profile 虽然挂了 `cordis-plugin-hmr`，实测**没有**触发。
+   本机联调时用的是「每次复制到一个新目录名」（`dsh-qq-bridge-dev` → `dev2` → `dev3`…）。
+
+### 12.4 出站闸门（`replyMode`）
+
+踩过的坑：最初每一轮 turn 的**全部**助手文本都会发到 QQ 群（技术说明、路径、思考过程全刷屏）。
+现在默认 `replyMode: 'marker'`：**只发 `[QQ]…[/QQ]` 块内的内容，没有块就一个字都不发**；
+入站消息会自动附一行提示告诉目标会话怎么回复。`'always'` 保留旧行为。
+
+### 12.5 上下文上限（曾漏掉）
+
+条数本来就有上限（buffer 200 / log 200 / outbox 50），但**单条正文没截断** ——
+群里贴一篇长文会原样进缓冲。现在：单条入站 4000、单条进缓冲 500、整段摘要 1200 字符，
+超长都带 `…（已截断）`。摘要从最新往回装，装不下丢更早的并注明省略条数。
+
+### 12.6 非文本消息段
+
+`mapOneBotMessage` 原来只认 `text`/`at`/`face`/`image`，**其它段静默丢弃** →
+「只发一个表情包、不带文字」的消息变成空串后被整条丢掉（连日志都不记）。
+现在有 `SEGMENT_LABELS` 表：`mface`（用 `data.summary`）、`record`、`video`、`file`、`json`/`xml`、
+`forward`、`poke`… 都给可读占位符；`reply`/`rps`/`dice` 这类纯元数据段才跳过。
+
+### 12.7 联调期的运行方式（就在本会话发生过）
+
+插件不安装进 bundle，而是**用 profile 用户层 patch 的 `insert` 行热加载**（`patchReload: live`，
+不需要重启 `dsh web`）：
+
+```yaml
+- insert:
+    - id: qq-bridge
+      name: dsh-qq-bridge-dev3      # 真实目录副本；换目录名是为了绕 ESM 缓存
+      config:
+        targetSessionId: '<你的会话 id>'
+        onebotUrl: 'ws://127.0.0.1:3001'
+        selfId: '<机器人 QQ>'
+        groupWhitelist: ['<群号>']
+```
+
+验证组合：`dsh --profile web --dump-config | Select-String "qq-bridge"`。
+
 ### `onebot.js`（M2 传输层）
 
 | 位置（函数） | 作用 |

@@ -330,6 +330,23 @@ await waitFor(() => state.followups.length === 2)
 check('群内被 @ → 唤醒', state.followups.length === 2)
 check('群渲染用了群名', textOf(state.followups[1]).includes('测试群'), textOf(state.followups[1]).slice(0, 60))
 
+// 5.5) 表情包：只发一个 mface、不带文字 —— **不能整条被丢掉**
+mock.sendEvent({
+  post_type: 'message',
+  message_type: 'private',
+  user_id: 1001,
+  self_id: 10001,
+  raw_message: '[CQ:mface]',
+  message: [{ type: 'mface', data: { summary: '[动画表情]' } }],
+  sender: { nickname: '小明' },
+})
+await sleep(500)
+{
+  const st = JSON.parse(await statusTool.execute({}))
+  const lastLog = st.recentLog[st.recentLog.length - 1]
+  check('纯表情包消息没被丢掉', String(lastLog?.text ?? '').includes('表情'), JSON.stringify(lastLog))
+}
+
 // 6) 概率 0 的非昵称 → 只记录
 mock.sendEvent({
   post_type: 'message',

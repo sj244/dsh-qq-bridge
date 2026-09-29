@@ -73,8 +73,9 @@ ensureTargetAgent():
 | `wakeProbability` | number | `0.05` | 非昵称消息的唤醒概率 |
 | `whitelist` | string[] | `[]` | 私聊 openid 白名单（空=全拒，fail-closed） |
 | `groupWhitelist` | string[] | `[]` | 群 openid 白名单 |
-| `attachRecentChat` / `recentChatLimit` | boolean / number | `true` / `20` | 未唤醒聊天是否作为摘要附给下次唤醒、条数 |
+| `attachRecentChat` / `recentChatLimit` | boolean / number | `true` / `8` | 未唤醒聊天是否作为摘要附给下次唤醒、条数 |
 | `replyMaxChars` | number | `1500` | 出站分段上限（下限 100） |
+| `replyMode` | string | `'marker'` | 出站闸门：只发 `[QQ]…[/QQ]` 块内的内容；`'always'` = 整轮都发 |
 | `onebotUrl` | string | `''` | NapCat 正向 WS 地址；**空 = 不启用传输** |
 | `accessTokenEnv` | string（`role('credential-ref')`） | `''` | access_token 的凭据引用名，**不放明文** |
 | `selfId` | string | `''` | 自己的 QQ 号；空 = 连上后 `get_login_info` 自动取 |
@@ -141,10 +142,10 @@ qq_bridge_napcat
 
 - **M1** ✅ **已完成并实测**：host 半 —— 固定会话 `ensureTargetAgent`（显式 resume）+
   `followup` + 唤醒策略引擎 + 出站采集 + 调试工具；曾在运行中的 host 内验证三条策略分支。
-- **M2** ✅ **已完成并离线端到端实测**：OneBot/NapCat 传输层（`onebot.js`）——
-  WS 连接管理、入站事件映射、出站 `sendToQQ()` 分段发送、token 走凭据引用。
-  由 `test-onebot.mjs`（内置最小 OneBot WS 服务器）覆盖全链路。
-  ⚠️ **尚未对真实 NapCat 联调**（本机没装/没跑 NapCat）。
+- **M2** ✅ **已完成，并已在真实 NapCat + 真实 QQ 上端到端跑通**（收/发/三种策略分支全部实测）。
+  传输层 `onebot.js`；离线测试 `test-onebot.mjs`；真机实录见 `HANDOVER.md` §12。
+- **M6（新增）** ✅ 出站闸门 `replyMode`（只发 `[QQ]…[/QQ]`）、上下文上限、
+  非文本消息段占位符 —— 都是真机联调暴露出来才补的。见 `HANDOVER.md` §12.4–12.6。
 - **M3** ⛔ **未开始**：设置界面（昵称/白名单/概率/目标会话/日志）。
 - **M4** ✅ **已完成**：打成 DSH bundle，`dsh plugin --profile web add <path>` 安装、重启、实测通过。
   （当前插件已被用户从 profile 卸载，源码与文档保留在本目录，可随时重装。）
