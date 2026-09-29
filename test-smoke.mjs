@@ -41,7 +41,7 @@ function check(label, cond, extra = '') {
 
 apply(ctx, config)
 console.log('registered tools:', registered.map((t) => t.name).join(', '))
-check('apply 未抛错且注册了 4 个工具', registered.length === 4)
+check('apply 未抛错且注册了 5 个工具', registered.length === 5)
 
 const sim = registered.find((t) => t.name === 'qq_bridge_simulate')
 const status = registered.find((t) => t.name === 'qq_bridge_status')
@@ -49,6 +49,7 @@ check('qq_bridge_simulate 存在', !!sim)
 check('qq_bridge_status 存在', !!status)
 check('qq_bridge_send 存在（M2）', !!registered.find((t) => t.name === 'qq_bridge_send'))
 check('qq_bridge_transport 存在（M2）', !!registered.find((t) => t.name === 'qq_bridge_transport'))
+check('qq_bridge_napcat 存在（M5）', !!registered.find((t) => t.name === 'qq_bridge_napcat'))
 
 // status 能跑通
 if (status) {
@@ -85,6 +86,18 @@ if (sim) {
   const g2 = JSON.parse(await sim.execute({ text: '在吗', groupId: 'test-group', userId: 'test-user', atSelf: true, dryRun: true }))
   check('群内被 @ + atOnlyInGroup → wake', g2.preview.action === 'wake', JSON.stringify(g2.preview))
   resolvedSettings.atOnlyInGroup = false
+}
+
+// M5：NapCat 托管工具——status 必须能跑通（假 ctx 没有 subprocess，应优雅报告不可用）
+{
+  const nap = registered.find((t) => t.name === 'qq_bridge_napcat')
+  const out = JSON.parse(await nap.execute({ action: 'status' }))
+  check('qq_bridge_napcat status 可执行', typeof out.installDir === 'string' && 'installed' in out, JSON.stringify(out.installDir))
+  check('无 subprocess 时如实报告', out.subprocessAvailable === false)
+  const bad = JSON.parse(await nap.execute({ action: 'nonsense' }))
+  check('未知 action 返回错误而非抛异常', typeof bad.error === 'string', bad.error)
+  const cannotLaunch = JSON.parse(await nap.execute({ action: 'launch' }))
+  check('未安装时 launch 明确报错', typeof cannotLaunch.error === 'string' && cannotLaunch.error.includes('download'), cannotLaunch.error)
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)

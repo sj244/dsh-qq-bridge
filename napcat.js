@@ -367,6 +367,27 @@ export function readOneBotConfig(configDir) {
   }
 }
 
+/**
+ * NapCat 的 config 目录可能落在几个地方，取决于安装方式：
+ *   - OneKey 解包出来的根目录下的 `config/`（如果整个目录被搬过去）
+ *   - QQ 安装目录里 NapCat 自己的数据目录（安装器安装后的常见落点）
+ * 这里只做**候选列举 + 存在性判断**，不猜、不乱写。
+ */
+export function configDirCandidates({ installDir, qqPath = null }) {
+  const list = [join(installDir, 'config')]
+  if (qqPath) {
+    const qqDir = dirname(qqPath)
+    list.push(join(qqDir, 'resources', 'app', 'app_launcher', 'napcat', 'config'))
+    list.push(join(qqDir, 'resources', 'app', 'napcat', 'config'))
+  }
+  return list.map((dir) => ({
+    dir,
+    exists: existsSync(dir),
+    hasOneBot: existsSync(join(dir, 'onebot11.json')),
+    hasWebUi: existsSync(join(dir, 'webui.json')),
+  }))
+}
+
 // ── QQ 检测（只读，不碰用户的 QQ 安装）───────────────────────────────────────
 
 const QQ_CANDIDATES = [

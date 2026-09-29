@@ -20,6 +20,22 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { createOneBotTransport } from './onebot.js'
+import {
+  configDirCandidates,
+  createFetcher,
+  defaultInstallDir,
+  detectQq,
+  downloadVerified,
+  extractZip,
+  isNapcatInstalled,
+  napcatPaths,
+  pickAsset,
+  readOneBotConfig,
+  resolveRelease,
+  writeOneBotConfig,
+  DEFAULT_ASSET,
+  MIN_QQ_BUILD,
+} from './napcat.js'
 
 export const name = 'qq-bridge'
 
@@ -44,6 +60,15 @@ export const Config = Schema.object({
   atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
   stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
   heartbeatTimeoutMs: Schema.number().default(90000).description('多久没有任何 WS 流量就判定连接已死并重连。'),
+  // ── M5：NapCat 自助托管 ───────────────────────────────────────────────────
+  // 注意：这些只是**参数**；插件加载时绝不下载或执行任何东西，
+  // 一切都要靠显式调用 qq_bridge_napcat 工具。
+  napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
+  napcatVersion: Schema.string().default('').description('要装的 NapCat 版本 tag（如 v4.18.28）；留空 = 最新。'),
+  napcatAsset: Schema.string().default(DEFAULT_ASSET).description('要下载的发行资产名。'),
+  downloadProxy: Schema.string().default('').description('下载用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
+  onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
+  qqNumber: Schema.string().default('').description('快速登录用的 QQ 号（需先成功登录过一次）。'),
   // 以下是 settings 命名空间的 composition base（装好的默认值）：
   // 设置界面里的用户层会覆盖它们。
   nicknames: Schema.array(Schema.string()).default(['244']),
@@ -70,6 +95,12 @@ const BridgeSettings = Schema.object({
   replyWithQuote: Schema.boolean().default(false),
   atOnlyInGroup: Schema.boolean().default(false),
   stripMarkdown: Schema.boolean().default(true),
+  // M5
+  napcatInstallDir: Schema.string().default(''),
+  napcatVersion: Schema.string().default(''),
+  downloadProxy: Schema.string().default(''),
+  onebotPort: Schema.number().default(3001),
+  qqNumber: Schema.string().default(''),
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +143,11 @@ export function apply(ctx, config) {
       replyWithQuote: config.replyWithQuote === true,
       atOnlyInGroup: config.atOnlyInGroup === true,
       stripMarkdown: config.stripMarkdown !== false,
+      napcatInstallDir: config.napcatInstallDir ?? '',
+      napcatVersion: config.napcatVersion ?? '',
+      downloadProxy: config.downloadProxy ?? '',
+      onebotPort: config.onebotPort ?? 3001,
+      qqNumber: config.qqNumber ?? '',
     },
     applies: 'live',
   })
@@ -140,6 +176,11 @@ export function apply(ctx, config) {
       atOnlyInGroup: s.atOnlyInGroup === true,
       stripMarkdown: s.stripMarkdown !== false,
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
+      napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
+      napcatVersion: String(s.napcatVersion ?? config.napcatVersion ?? '').trim(),
+      downloadProxy: String(s.downloadProxy ?? config.downloadProxy ?? '').trim(),
+      onebotPort: Math.max(1, Math.min(65535, Number(s.onebotPort ?? config.onebotPort ?? 3001))),
+      qqNumber: String(s.qqNumber ?? config.qqNumber ?? '').trim(),
     }
   }
 
@@ -708,6 +749,198 @@ export function apply(ctx, config) {
       },
     }))
   }
+
+  // ── M5：NapCat 自助托管（下载 / 配置 / 启停）───────────────────────────────
+  //
+  // 安全模型：**所有动作都由显式工具调用触发**。插件加载时绝不去下载或执行任何东西——
+  // 下载并运行第三方二进制是重大决定，必须由人按下那个按钮。
+  //
+  // 已知边界（不要假装能做到）：
+  //   * `SubprocessStdio.stdin` 只有 'ignore' | 'pipe' | {data}，**没有 inherit**，
+  //     所以交互式的 `NapCatInstaller.exe` 没法通过 ctx.subprocess 驱动 → 那一步必须用户手动。
+  //   * QQ 首次登录必须扫码/密码，同样无法自动化。
+
+  let napcatProc = null
+
+  function napcatPathsNow() {
+    const s = readSettings()
+    const installDir = s.napcatInstallDir || defaultInstallDir(home)
+    return { s, installDir, paths: napcatPaths(installDir) }
+  }
+
+  /** 下载用的代理：设置优先，其次环境变量，最后直连。 */
+  function proxyFor(s) {
+    if (s.downloadProxy !== '') return s.downloadProxy
+    const env = process.env
+    return (
+      env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy || ''
+    )
+  }
+
+  async function napcatStatus() {
+    const { s, installDir, paths } = napcatPathsNow()
+    const qq = detectQq()
+    const cfg = readOneBotConfig(paths.configDir)
+    const token = await resolveAccessToken()
+    const enabled = Array.isArray(cfg?.network?.websocketServers)
+      ? cfg.network.websocketServers.filter((w) => w?.enable)
+      : []
+    return {
+      installDir,
+      installed: isNapcatInstalled(installDir),
+      bootMain: paths.bootMain,
+      installer: paths.installer,
+      running: napcatProc !== null,
+      qq: { primary: qq.primary, found: qq.found, minBuild: MIN_QQ_BUILD },
+      subprocessAvailable: Boolean(ctx.get('subprocess')),
+      downloadProxy: proxyFor(s) || '(未配置 → 直连；本机直连 GitHub 不通，建议设成 http://127.0.0.1:7890)',
+      onebotPort: s.onebotPort,
+      onebotUrlSuggested: `ws://127.0.0.1:${s.onebotPort}`,
+      currentOnebotUrl: s.onebotUrl || '(未设置)',
+      accessTokenEnv: s.accessTokenEnv,
+      tokenResolved: token !== '',
+      configured: enabled.length > 0,
+      configuredServers: enabled.map((w) => ({ name: w.name, host: w.host, port: w.port, tokenSet: w.token !== '' })),
+      configDir: paths.configDir,
+      configCandidates: configDirCandidates({ installDir, qqPath: qq.primary }),
+    }
+  }
+
+  async function napcatDownload(args) {
+    const { s, installDir, paths } = napcatPathsNow()
+    if (isNapcatInstalled(installDir) && args.force !== true) {
+      return { skipped: true, reason: '该目录看起来已经解包过了（force: true 可强制重下）', installDir }
+    }
+    const proxy = proxyFor(s)
+    const fetcher = createFetcher({ subprocess: ctx.get('subprocess'), logger, proxy })
+    const version = String(args.version ?? '').trim() || s.napcatVersion
+    const release = await resolveRelease({ version, fetcher })
+    const asset = pickAsset(release.assets, s.napcatAsset)
+    const dl = await downloadVerified({ fetcher, asset, dest: paths.zipPath, logger })
+    const ex = extractZip(paths.zipPath, installDir)
+    return {
+      tag: release.tag,
+      asset: asset.name,
+      via: dl.via,
+      proxy: proxy || '(直连)',
+      sha256Verified: dl.verified,
+      sha256: dl.sha256,
+      extractedFiles: ex.files.length,
+      installDir,
+      next:
+        '解包完成。接下来需要**你手动**运行安装器（它是交互式的，插件没法驱动它的 stdin）：\n' +
+        `  ${paths.installer}\n` +
+        '走完它的提示后，回来调用 action:"configure" 写 OneBot 配置，再 action:"launch"。',
+    }
+  }
+
+  async function napcatConfigure(args) {
+    const { s, installDir, paths } = napcatPathsNow()
+    const qq = detectQq()
+    const explicit = String(args.configDir ?? '').trim()
+    let configDir = explicit !== '' ? explicit : paths.configDir
+    if (explicit === '') {
+      // 安装目录里如果没有 config/，但 QQ 那边已经存在 NapCat 的 config，就用那个。
+      const hit = configDirCandidates({ installDir, qqPath: qq.primary }).find((c) => c.hasWebUi || c.hasOneBot)
+      if (hit) configDir = hit.dir
+    }
+    const token = await resolveAccessToken()
+    const path = writeOneBotConfig({ configDir, port: s.onebotPort, token })
+    return {
+      path,
+      configDir,
+      port: s.onebotPort,
+      host: '127.0.0.1',
+      tokenSet: token !== '',
+      onebotUrlToSet: `ws://127.0.0.1:${s.onebotPort}`,
+      notes: [
+        token === '' ? '⚠️ 没解析到 access_token（accessTokenEnv 没配或凭据为空），写进去的 token 是空的 = 无鉴权。' : 'token 已按 accessTokenEnv 写入。',
+        'NapCat 需要**重启**才会读这份配置。',
+        '如果 NapCat 实际读取的 config 目录不是这个，用 configDir 参数显式指定。',
+      ],
+    }
+  }
+
+  function napcatLaunch() {
+    const { s, paths } = napcatPathsNow()
+    if (napcatProc !== null) throw new Error('NapCat 已经由本插件启动过了（先 action:"stop"）')
+    if (!existsSync(paths.bootMain)) throw new Error(`找不到 ${paths.bootMain}，先跑 action:"download"`)
+    const subprocess = ctx.get('subprocess')
+    if (!subprocess) throw new Error('这个 profile 没有 subprocess 服务，无法启动 NapCat')
+
+    const argv = [paths.bootMain, ...(s.qqNumber !== '' ? [s.qqNumber] : [])]
+    const handle = subprocess.spawn({
+      argv,
+      cwd: paths.bootDir,
+      // 注意：stdin 没有 'inherit' 这个取值；输出用 inherit 让 NapCat 的日志
+      // （含 WebUI 随机 token）出现在 DSH 宿主的控制台上。
+      stdio: { stdin: 'ignore', stdout: 'inherit', stderr: 'inherit' },
+      graceMs: 8000,
+    })
+    napcatProc = handle
+    const clear = (why) => {
+      if (napcatProc === handle) napcatProc = null
+      logger.warn(`NapCat 进程结束：${why}`)
+    }
+    handle.done.then((o) => clear(`exit=${o.exitCode} signal=${o.signal ?? '-'}`)).catch((e) => clear(`异常 ${e?.message ?? e}`))
+
+    return {
+      launched: paths.bootMain,
+      qqNumber: s.qqNumber || '(未设置 → 需要你手动扫码登录一次)',
+      notes: [
+        '首次登录必须手动（扫码/密码），NapCat 官方也要求「登录过一次」才能用 QQ 号快速登录。',
+        'NapCat 的 WebUI 地址与随机 token 会打在它的控制台输出里，也可读 config/webui.json。',
+        '⚠️ 这个进程由 DSH 的 subprocess 服务托管：插件被卸载或 DSH 退出时会一并结束。',
+      ],
+    }
+  }
+
+  async function napcatStop() {
+    if (napcatProc === null) return { stopped: false, reason: '没有由本插件启动的 NapCat 进程' }
+    const handle = napcatProc
+    handle.terminate()
+    await Promise.race([handle.waitForExit(), new Promise((r) => setTimeout(r, 8000))])
+    if (napcatProc === handle) napcatProc = null
+    return { stopped: true }
+  }
+
+  // 这个工具**不受 debugTools 开关限制**：它是本插件的"一键"入口，不是调试工具。
+  ctx.tools.register(defineTool({
+    name: 'qq_bridge_napcat',
+    description:
+      '自助管理 NapCat（OneBot 实现）：查看状态、下载最新发行包并校验 sha256、解包、写 OneBot 配置、启动/停止。所有动作都由本调用显式触发，插件平时不会自己下载或执行任何东西。典型顺序：status → download →（你手动跑一次安装器）→ configure → launch。',
+    parameters: {
+      action: {
+        type: 'string',
+        required: true,
+        description: 'status（默认先看这个）/ download / configure / launch / stop。',
+      },
+      version: { type: 'string', description: 'download 时指定 NapCat 版本 tag（如 v4.18.28）；默认用设置值或最新。' },
+      configDir: { type: 'string', description: 'configure 时显式指定配置目录（不确定写哪时用 status 看候选）。' },
+      force: { type: 'boolean', description: 'download 时即使已解包也强制重下。' },
+    },
+    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
+    async execute(args) {
+      try {
+        switch (String(args.action ?? 'status')) {
+          case 'status':
+            return JSON.stringify(await napcatStatus(), null, 2)
+          case 'download':
+            return JSON.stringify(await napcatDownload(args), null, 2)
+          case 'configure':
+            return JSON.stringify(await napcatConfigure(args), null, 2)
+          case 'launch':
+            return JSON.stringify(napcatLaunch(), null, 2)
+          case 'stop':
+            return JSON.stringify(await napcatStop(), null, 2)
+          default:
+            return JSON.stringify({ error: `未知 action: ${args.action}`, valid: ['status', 'download', 'configure', 'launch', 'stop'] }, null, 2)
+        }
+      } catch (error) {
+        return JSON.stringify({ error: error?.message ?? String(error) }, null, 2)
+      }
+    },
+  }))
 
   logger.info(`ready (target=${readSettings().targetSessionId || '未设置'}, onebot=${readSettings().onebotUrl || '未配置'}, state=${statePath})`)
 }
