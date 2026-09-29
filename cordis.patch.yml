@@ -1,0 +1,23 @@
+# dsh-qq-bridge bundle patch: one insert row carrying the whole plugin config.
+# 用户在 profile 的 cordis.patch.yml 里按 id 覆盖这一行；patch 会替换整份 config，
+# 所以要保留的键请全部重述。
+- insert:
+    - id: qq-bridge
+      name: dsh-qq-bridge
+      config:
+        # 固定目标会话：QQ 的一切都注入这一个会话（保留其上下文）。
+        targetSessionId: '<TARGET_SESSION_ID>'
+        # 可选：resume 目标会话时挂载的 agent preset（留空则沿用会话 header 里记录的）。
+        agentPreset: ''
+        # 状态文件（最近聊天缓冲 + 唤醒日志）。留空 = $DSH_HOME/qq-bridge-state.json
+        statePath: ''
+        # 注册 qq_bridge_status / qq_bridge_simulate 两个调试工具（M1 验证用）。
+        debugTools: true
+        # ↓ 这几项是 settings 命名空间 qq-bridge 的默认值（设置界面可覆盖）
+        nicknames: ['244', '猫猫']
+        # 非昵称消息的唤醒概率（5%）
+        wakeProbability: 0.05
+        # ⚠️ 白名单 fail-closed：空数组 = 谁都不能唤醒。
+        # 'test-user' 是 M1 自测用的假 id，正式使用请换成你自己的 QQ openid。
+        whitelist: ['test-user']
+        groupWhitelist: []

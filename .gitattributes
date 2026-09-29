@@ -1,0 +1,2 @@
+# Normalize line endings in the repository; check out platform defaults.
+* text=auto eol=lf

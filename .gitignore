@@ -1,0 +1,17 @@
+# Dependencies and local link shims.
+# node_modules/ contains a junction to ~/.dsh/profiles/node_modules/@deepseek-ai;
+# it is a local-development crutch and must never be committed.
+node_modules/
+
+# Local-only handover notes: the unredacted copy that keeps real session ids,
+# machine paths and QQ group ids. The sanitized HANDOVER.md is the tracked one.
+HANDOVER.local.md
+
+# Runtime state written by the plugin (buffer / wake log / outbox).
+qq-bridge-state.json
+qq-bridge-state.json.tmp
+
+# Logs and OS noise
+*.log
+Thumbs.db
+.DS_Store
