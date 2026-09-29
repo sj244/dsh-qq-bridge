@@ -36,8 +36,9 @@
 | **M1** | 固定会话注入 + 显式 resume + 唤醒策略 + 出站采集 + 调试工具 | ✅ **已完成，且曾在真实 host 中实测通过** |
 | **M2** | OneBot(NapCat) 传输层：入站 → `handleInbound()`，出站 → `sendToQQ()` | ✅ **已完成**（`onebot.js`，离线端到端实测通过；⚠️ **尚未对真实 NapCat 联调**） |
 | **M3** | 设置界面（昵称 / 白名单 / 概率 / 目标会话 / 唤醒日志） | ⛔ **未开始** |
+| **M5** | NapCat 自助托管：下载 / sha256 校验 / 解包 / 写 OneBot 配置 / 启停 | ✅ **已完成**（离线 + 真实包验证；⚠️ **未在真实 NapCat 上跑通全流程**） |
 | — | 插件在 profile 中的安装 | ⚠️ **已被用户卸载**（源码保留在本目录，可随时重装） |
-| — | 离线测试 | ✅ `node test-smoke.mjs`（策略分支，全绿）+ `node test-onebot.mjs`（M2 端到端，全绿） |
+| — | 离线测试 | ✅ `node test-smoke.mjs`（策略/工具）+ `node test-onebot.mjs`（M2 端到端）+ `node test-napcat.mjs`（M5 解包/校验），全绿 |
 
 > 卸载是用户的决定（当时 DSH 新版不稳定、不想叠加变量），**不是代码不可用**。M1 曾通过 `qq_bridge_status` / `qq_bridge_simulate` 两个工具在运行中的 host 内跑通三条分支。
 
@@ -49,12 +50,14 @@
 |---|---|---|
 | `index.js` | ~30 KB | **host 半主体**：M1 全部逻辑 + M2 的接入（配置、入站映射、出站分段、调试工具） |
 | `onebot.js` | ~12 KB | **M2 传输层**：内置 WebSocket 连接管理、退避重连、心跳看门狗、action/echo 收发 |
-| `cordis.patch.yml` | ~2.4 KB | bundle 挂载声明 + 安装期默认配置（composition base，含 M2 键） |
+| `napcat.js` | ~14 KB | **M5 托管层**：GitHub 发行查询、sha256 校验下载、纯 Node ZIP 解包、OneBot 配置读写、QQ 检测 |
+| `cordis.patch.yml` | ~3.5 KB | bundle 挂载声明 + 安装期默认配置（composition base，含 M2/M5 键） |
 | `package.json` | ~0.9 KB | 包声明：`name=dsh-qq-bridge`、`type=module`、`dsh.bundle.patch` |
-| `DESIGN.md` | ~9 KB | 设计草案：与现有 QQ 插件的区别、唤醒策略、接口表、设置项、里程碑、安全注意 |
-| `README.md` | ~6 KB | 安装/使用说明，含 OneBot 接入、access_token 配置、依赖解析坑与解法 |
-| `test-smoke.mjs` | ~4 KB | **离线冒烟测试**（假 ctx 直接调 `apply()`，覆盖策略分支） |
+| `DESIGN.md` | ~12 KB | 设计草案：与现有 QQ 插件的区别、唤醒策略、接口表、设置项、里程碑、安全注意 |
+| `README.md` | ~9 KB | 安装/使用说明，含 OneBot 接入、access_token 配置、NapCat 一键托管、依赖解析坑与解法 |
+| `test-smoke.mjs` | ~5 KB | **离线冒烟测试**（假 ctx 直接调 `apply()`，覆盖策略分支与工具注册） |
 | `test-onebot.mjs` | ~14 KB | **M2 端到端测试**：内置最小 OneBot WS 服务器（手写 RFC 6455，不依赖 `ws`） |
+| `test-napcat.mjs` | ~9 KB | **M5 测试**：测试自己造 zip，覆盖解包 / CRC / zip-slip / 摘要校验 / 配置写入 |
 | `LICENSE` | ~1 KB | MIT，Copyright (c) 2026 sj244 |
 | `node_modules\@deepseek-ai` | junction | 本地安装时让 `import '@deepseek-ai/...'` 能解析（见 §7 坑 1）；**已 gitignore** |
 | `HANDOVER.local.md` | — | **未脱敏**的原始交接文档（含真实会话 id / 本机路径 / 群号），**只在本机，已 gitignore** |
@@ -179,6 +182,12 @@ Config（`cordis.patch.yml`）另有：`agentPreset`（resume 时挂载的 prese
 - `qq_bridge_transport` —— **（M2 新增）** 看连接状态（含 `accessTokenEnv` 是否解析到 token），
   或 `action: 'reconnect'` 强制重连。
 - `qq_bridge_simulate` —— 模拟一条入站消息走完整策略；`dryRun: true` 只返回决策、不注入。
+
+**M5 新增（不受 `debugTools` 开关限制，因为它是本插件的"一键"入口而不是调试工具）：**
+
+- `qq_bridge_napcat` —— `status` / `download` / `configure` / `launch` / `stop`。
+  典型顺序：`status` → `download` →（**用户手动**跑一次 `NapCatInstaller.exe`）→ `configure` → `launch`。
+  `status` 会一并列出 NapCat 配置目录的候选位置（因为 `config/` 落在哪取决于安装方式）。
 
 这些工具是排障主力，**保留**。
 
@@ -341,6 +350,25 @@ export function apply(ctx, config) { /* … */ }
     插件目录只挂了 `@deepseek-ai` 一个 junction，`ws` 从这里解析不到（`ERR_MODULE_NOT_FOUND`）。
     用 Node ≥ 22 的内置全局 `WebSocket`（零依赖）。注意它是 WHATWG 接口、**不能传请求头**。
 
+11. **NapCat 的现场事实（M5 调研结论，避免重复踩）**
+    - 官方发行（`NapNeko/NapCatQQ`）四个包：`NapCat.Shell.Windows.OneKey.zip`（**1 MB，引导器**，
+      内含 `NapCatInstaller.exe` + `bootmain/NapCatWinBootMain.exe` + `7z.exe`）、`NapCat.Shell.zip`（29.5 MB）、
+      `NapCat.Shell.Windows.Node.zip`（116.7 MB）、`NapCat.Framework.zip`。
+    - Release API 的每个 asset **自带 `digest: sha256:…`** → 用来校验下载。
+    - **QQ NT 要求 ≥ 40768**；启动方式 `bootmain/NapCatWinBootMain.exe [QQ号]`。
+    - **OneKey 的 ReadMe 原话：「编辑 quick 的脚本即可实现快速登录（需要登录过一次）」**
+      —— 首次登录必须手动，无法自动化。
+    - **`NapCatInstaller.exe` 是交互式的**，而 DSH 的 `SubprocessStdio.stdin` 只有
+      `'ignore' | 'pipe' | {data}`、**没有 `inherit`** → 插件驱动不了它，这一步必须用户手动。
+    - **配置落点**：NapCat ≥ v4.5.3 支持 `./config/onebot11.json` 作为默认配置（按账号则是
+      `onebot11_<QQ号>.json`）。但 `./` 取决于安装方式（OneKey 根目录 / QQ 安装目录里的
+      `resources/app/app_launcher/napcat/config`），所以 `status` 会列候选、`configure` 可显式指定。
+    - WebUI 默认端口 **6099**、token 随机，启动日志会打 `WebUi User Panel Url: …?token=xxxxx`；
+      端口被占会自动 +1。
+    - ⚠️ **大文件经 7890 代理很慢**：29 MB 的 `NapCat.Shell.zip` 在 300 s 内只下了 13 MB 就超时；
+      1 MB 的 OneKey 秒下。所以 M5 默认选 OneKey。
+    - ⚠️ **NapCat 是第三方 QQ 客户端**，有账号风控风险——这一点必须让用户自己决定。
+
 ---
 
 ## 8. 验证手册（改完照这个顺序验）
@@ -353,6 +381,7 @@ node --check onebot.js
 # 2) 离线测试（都要 ALL PASS）
 node test-smoke.mjs            # 策略分支 + 工具注册；概率实测 ≈5%
 node test-onebot.mjs           # M2 端到端：内置最小 OneBot WS 服务器，覆盖收发全链路
+node test-napcat.mjs           # M5：自造 zip 验证解包/CRC/zip-slip/摘要校验/配置写入
 
 # 3) 从 profile 里做加载检查
 cd "$env:USERPROFILE\.dsh\profiles\web"
@@ -430,6 +459,23 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 | `sendToQQ(text, destination?)` | **M2 已实现**：真实发到 OneBot（私聊/群），分段 + 可选引用 |
 | `loadState()` / `saveState()` / `pushLog()` | 状态持久化（含 `lastDestination` / `lastMessageId`） |
 | `qq_bridge_status` / `qq_bridge_send` / `qq_bridge_transport` / `qq_bridge_simulate` | 调试工具 |
+| `napcatStatus()` / `napcatDownload()` / `napcatConfigure()` / `napcatLaunch()` / `napcatStop()` | **M5**：托管编排（`qq_bridge_napcat` 的五个 action） |
+| `proxyFor(settings)` | **M5**：下载代理，设置 → 环境变量 → 直连 |
+
+### `napcat.js`（M5 托管层）
+
+| 位置（函数） | 作用 |
+|---|---|
+| `resolveRelease({version, fetcher})` | 查 GitHub Release（latest 或指定 tag），规范化 assets（含 `digest` → sha256） |
+| `pickAsset(assets, pattern)` | 按资产名选包（精确 → 包含），找不到明确报错 |
+| `createFetcher({subprocess, logger, proxy})` | 造取数器：优先 `curl.exe`（可带代理），退回内置 `fetch` |
+| `downloadVerified({fetcher, asset, dest})` | 下载 + **sha256 校验**，不符则删文件并抛错 |
+| `extractZip(zipPath, destDir)` | **纯 Node ZIP 解包**（store/deflate、CRC32 校验、拒绝 zip-slip） |
+| `crc32(buf)` / `sha256Of` / `sha256File` | 摘要工具 |
+| `oneBotConfig()` / `writeOneBotConfig()` / `readOneBotConfig()` | 生成与读写 NapCat 的 `config/onebot11.json` |
+| `configDirCandidates({installDir, qqPath})` | 列出 NapCat 配置目录的候选位置（**不猜、不乱写**） |
+| `detectQq()` | 只读地找 QQ 安装位置（不碰用户的 QQ） |
+| `defaultInstallDir(home)` / `napcatPaths(dir)` / `isNapcatInstalled(dir)` | 路径与安装状态 |
 
 ### `onebot.js`（M2 传输层）
 

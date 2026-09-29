@@ -60,6 +60,46 @@ QQ 消息 ─┬─ 不在白名单            → 丢弃（fail-closed）
 - `stripMarkdown: true`（默认）时先去掉 Markdown 标记，因为 QQ 不渲染；
 - **连不上或还没有目的地时会丢弃并记日志**，不会静默排队堆积。
 
+## NapCat 一键托管（M5）
+
+不想自己装 NapCat？插件可以**替你下载、校验、解包、写配置、启停**——类似"一键包"的体验，
+但**不真打包 NapCat**，而是按需从官方 GitHub Releases 现取。
+
+### 用法
+
+在会话里调用 `qq_bridge_napcat` 工具，按这个顺序走：
+
+| 步骤 | 调用 | 说明 |
+|---|---|---|
+| 1 | `{ action: "status" }` | 看 QQ 有没有装、NapCat 在不在、代理配没配、端口对不对 |
+| 2 | `{ action: "download" }` | 取最新发行包 → **sha256 校验** → 解包到 `napcatInstallDir` |
+| 3 | **你手动跑一次安装器** | 见下，这一步插件做不了 |
+| 4 | `{ action: "configure" }` | 写 `config/onebot11.json`，把正向 WS 端口和 token 配好（**免点 WebUI**） |
+| 5 | `{ action: "launch" }` | 拉起 NapCat（首次仍需扫码登录） |
+
+### 为什么第 3 步必须你手动
+
+- `NapCatInstaller.exe` 是**交互式控制台程序**，而 DSH 的 `SubprocessStdio.stdin` 只支持
+  `'ignore' | 'pipe' | {data}`，**没有 `inherit`** —— 插件没法把你的键盘输入转给它。
+- **QQ 首次登录必须手动**（扫码/密码）。NapCat 官方要求"登录过一次"之后，才能用 QQ 号快速登录。
+
+### ⚠️ 下载要走代理
+
+插件里的下载**不读** `HTTPS_PROXY`（Node 的 `fetch` 不认代理），所以：
+
+- 有代理就把 `downloadProxy` 设成它，例如 `http://127.0.0.1:7890`；
+- 留空时会依次读 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 环境变量，都没有才直连。
+- 下载实现优先用系统自带的 **`curl.exe`**（能带 `-x` 代理），没有 subprocess 服务时才退回内置 `fetch`。
+
+### 安全边界
+
+- **插件从不自动下载或执行任何东西**：所有动作都由 `qq_bridge_napcat` 的显式调用触发。
+- 每次下载都按 GitHub Release 自带的 `asset.digest` 做 **sha256 校验**，不符就删掉文件并报错。
+- ZIP 用**纯 Node 实现**解包（不依赖 7z / Expand-Archive），并拒绝 `..`、绝对路径等 zip-slip 条目。
+- 默认安装位是 `$DSH_HOME/napcat`，不污染项目目录。
+- ⚠️ **NapCat 是第三方 QQ 客户端**，有账号风控风险；用不用由你决定。启动的进程由 DSH 的 subprocess
+  服务托管，**插件卸载或 DSH 退出时会一并结束**。
+
 ## 设置项（settings 命名空间 `qq-bridge`）
 
 | 键 | 默认 | 说明 |
@@ -76,6 +116,11 @@ QQ 消息 ─┬─ 不在白名单            → 丢弃（fail-closed）
 | `replyWithQuote` | `false` | 回复时引用触发消息 |
 | `atOnlyInGroup` | `false` | 群里只有被 @ 才处理 |
 | `stripMarkdown` | `true` | 出站去掉 Markdown 标记 |
+| `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat` |
+| `napcatVersion` | `''` | 要装的版本 tag；空 = 最新 |
+| `downloadProxy` | `''` | 下载用代理；空 = 读环境变量 |
+| `onebotPort` | `3001` | 写进 NapCat 配置并用来连的 WS 端口 |
+| `qqNumber` | `''` | 快速登录用 QQ 号（需先手动登录过一次） |
 
 这些值优先从设置界面/`settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的 composition base。
 
@@ -104,9 +149,11 @@ dsh plugin --profile web add "<REPO>"
 ```powershell
 node test-smoke.mjs     # 策略分支 + 工具注册（假 ctx，纯离线）
 node test-onebot.mjs    # M2 端到端：内置最小 OneBot WS 服务器，验证收发全链路
+node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / 配置写入
 ```
 
-两个测试都零依赖。`test-onebot.mjs` 需要 **Node >= 22**（用到内置的全局 `WebSocket`）。
+三个测试都零依赖（测试自己造 zip、自己起 WS 服务器）。
+`test-onebot.mjs` 需要 **Node >= 22**（用到内置的全局 `WebSocket`）。
 
 ## 调试工具（`debugTools: true` 时注册）
 
@@ -115,10 +162,16 @@ node test-onebot.mjs    # M2 端到端：内置最小 OneBot WS 服务器，验�
 - `qq_bridge_transport` — 看连接状态（含 token 是否解析到），或 `action: 'reconnect'` 强制重连。
 - `qq_bridge_simulate` — 模拟一条入站消息走完整策略；`dryRun: true` 只看决策不注入。
 
+## NapCat 托管工具（始终注册，不受 `debugTools` 限制）
+
+- `qq_bridge_napcat` — `status` / `download` / `configure` / `launch` / `stop`，见上文「NapCat 一键托管」。
+
 ## 路线
 
 - **M1** ✅ 固定会话注入 / 显式 resume / 唤醒策略 / 出站采集 / 调试工具
 - **M2** ✅ OneBot(NapCat) 传输：WS 入站 → `handleInbound()`；出站 `sendToQQ()` → `send_private_msg` / `send_group_msg`
 - **M3** ⏳ 设置界面（昵称 chips / 白名单 / 概率滑块 / 目标会话选择 / 唤醒日志）
 - **M4** ✅ 打成 DSH bundle，`dsh plugin add` 安装、重启、实测通过
+- **M5** ✅ NapCat 自助托管（下载 / sha256 校验 / 解包 / 写配置 / 启停）；
+  ⚠️ 未对真实 NapCat 跑通全流程（安装器与 QQ 登录是交互式的，需要人在场）
 - **待办** ⏳ 把 `approval/request` 桥到 QQ（无人值守时工具审批会挂起，目前没做）

@@ -33,6 +33,21 @@
         # 多久没有任何 WS 流量就判定连接已死并重连。
         heartbeatTimeoutMs: 90000
 
+        # ── M5：NapCat 自助托管（“一键包”体验，但不真打包）─────────────────────
+        # 注意：这些只是**参数**。插件加载时绝不会去下载或执行任何东西，
+        # 一切动作都要靠显式调用 qq_bridge_napcat 工具触发。
+        # NapCat 安装目录；留空 = $DSH_HOME/napcat
+        napcatInstallDir: ''
+        # 要装的版本 tag（如 v4.18.28）；留空 = 最新
+        napcatVersion: ''
+        # 下载用的 HTTP 代理。**本机直连 GitHub 不通**，走代理才行，例如
+        # http://127.0.0.1:7890；留空 = 读 HTTPS_PROXY/HTTP_PROXY/ALL_PROXY 环境变量。
+        downloadProxy: ''
+        # 写进 NapCat 配置、并用来连的正向 WS 端口
+        onebotPort: 3001
+        # 快速登录用的 QQ 号（需先用 QQ 手动成功登录过一次）
+        qqNumber: ''
+
         # ↓ 以下几项是 settings 命名空间 qq-bridge 的默认值（设置界面可覆盖）
         nicknames: ['244', '猫猫']
         # 非昵称消息的唤醒概率（5%）

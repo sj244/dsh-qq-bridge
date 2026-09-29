@@ -111,6 +111,32 @@ Config（`cordis.patch.yml`）另有：`agentPreset`、`statePath`、`debugTools
 - 出站：`send_private_msg` / `send_group_msg`，按 `replyMaxChars` 分段，
   目的地 = **最后一次入站消息的来源**（持久化在 `state.lastDestination`）。
 
+### 7.1 NapCat 自助托管（M5，"一键包"体验但不真打包）
+
+思路：**不把 NapCat 打进仓库**，而是在需要时由插件从官方 Releases 现取并托管。
+
+```
+qq_bridge_napcat
+  status     → QQ 是否装了 / NapCat 在不在 / 代理配没配 / 端口对不对
+  download   → 取发行包 → sha256 校验 → 解包到 $DSH_HOME/napcat
+  configure  → 写 config/onebot11.json（正向 WS 端口 + token），免点 WebUI
+  launch     → ctx.subprocess 拉起 NapCatWinBootMain.exe
+  stop       → 结束该进程
+```
+
+- **安全模型**：所有动作都由**显式工具调用**触发；插件加载时绝不下崽、绝不执行任何东西。
+- **下载实现**：优先 `ctx.subprocess` + 系统自带 `curl.exe`（能带 `-x` 代理；本机直连 GitHub 不通），
+  无 subprocess 时退回内置 `fetch`。
+- **校验**：按 GitHub Release 的 `asset.digest` 做 sha256，不符即删文件报错。
+- **解包**：纯 Node（`node:zlib` 的 `inflateRawSync`），不依赖 7z / Expand-Archive；
+  校验 CRC32，并拒绝 `..` / 绝对路径（zip-slip）。
+- **配置落点不确定**：NapCat 的 `config/` 取决于安装方式，所以 `status` 会列出候选目录
+  （OneKey 根目录下的 `config/`、QQ 安装目录里的 NapCat 数据目录），`configure` 也可显式指定。
+- **做不到的（已在文档与工具输出里明确写出）**：
+  1. `NapCatInstaller.exe` 是交互式的，而 `SubprocessStdio.stdin` 没有 `inherit` → 必须用户手动跑；
+  2. QQ 首次登录必须扫码/密码 → 无法自动化；
+  3. 启动的进程由 DSH subprocess 服务托管，插件卸载 / DSH 退出时一并结束。
+
 ## 8. 里程碑（含当前状态）
 
 - **M1** ✅ **已完成并实测**：host 半 —— 固定会话 `ensureTargetAgent`（显式 resume）+
@@ -122,6 +148,10 @@ Config（`cordis.patch.yml`）另有：`agentPreset`、`statePath`、`debugTools
 - **M3** ⛔ **未开始**：设置界面（昵称/白名单/概率/目标会话/日志）。
 - **M4** ✅ **已完成**：打成 DSH bundle，`dsh plugin --profile web add <path>` 安装、重启、实测通过。
   （当前插件已被用户从 profile 卸载，源码与文档保留在本目录，可随时重装。）
+- **M5** ✅ **已完成（离线验证）**：NapCat 自助托管 —— 下载 / sha256 校验 / 纯 Node 解包 /
+  写 OneBot 配置 / 启停，见 §7.1。
+  ✅ 真实数据验证过：下载 OneKey 包，sha256 与 Release digest 一致，纯 Node 解包出全部 9 个文件。
+  ⚠️ **未在真实 NapCat 上跑通全流程**（安装器与 QQ 登录是交互式的，需要人在场）。
 - **待办** ⛔ **未开始**：`approval/request` / `user-questions/request` 桥接到 QQ。
 
 ## 9. 安全与注意
