@@ -53,6 +53,10 @@ const MAX_BUFFER_ITEM_CHARS = 500
 /** 整个"未唤醒聊天摘要"的总上限（从最新往回装，装不下就丢更早的）。
  *  QQ 群闲聊很短，8 条 × 一两百字足够了；给多了纯属浪费上下文。 */
 const MAX_DIGEST_CHARS = 1200
+/** 单条缓冲消息最多存几个图片 URL。 */
+const MAX_BUFFER_IMAGES_PER_ITEM = 2
+/** 一次唤醒最多从缓冲里带几张图（真正的硬上限在 attachments.imageLimits）。 */
+const MAX_BUFFER_IMAGES_TOTAL = 4
 /** 摘要默认取最近几条（`recentChatLimit` 的默认值）。 */
 const DEFAULT_RECENT_CHAT_LIMIT = 8
 
@@ -357,29 +361,47 @@ export function apply(ctx, config) {
   }
 
   function renderDigest(s) {
-    if (!s.attachRecentChat || state.buffer.length === 0) return ''
+    if (!s.attachRecentChat || state.buffer.length === 0) return { text: '', images: [] }
     const items = state.buffer.slice(-s.recentChatLimit)
-    if (items.length === 0) return ''
+    if (items.length === 0) return { text: '', images: [] }
 
     // 从**最新**往回装，总长封顶 —— 装不下的更早消息直接省略，
     // 并且至少保留一条（哪怕那一条本身超长，也要截断后留下）。
     const lines = []
+    const included = []
     let budget = MAX_DIGEST_CHARS
     for (let i = items.length - 1; i >= 0; i--) {
       const m = items[i]
       const line = `${m.nickname || m.userId || '未知'}${m.groupName ? `@${m.groupName}` : ''}: ${m.text}`
       if (line.length > budget) {
-        if (lines.length === 0) lines.unshift(truncateText(line, Math.max(0, budget)))
+        if (lines.length === 0) {
+          lines.unshift(truncateText(line, Math.max(0, budget)))
+          included.unshift(m)
+        }
         break
       }
       lines.unshift(line)
+      included.unshift(m)
       budget -= line.length + 1
     }
-    if (lines.length === 0) return ''
+    if (lines.length === 0) return { text: '', images: [] }
+
+    // 缓冲里的图片只存了 URL（几乎不占空间），到这里才真正下载。
+    const images = []
+    for (const m of included) {
+      for (const img of Array.isArray(m.images) ? m.images : []) {
+        if (images.length >= MAX_BUFFER_IMAGES_TOTAL) break
+        images.push(img)
+      }
+      if (images.length >= MAX_BUFFER_IMAGES_TOTAL) break
+    }
 
     const omitted = items.length - lines.length
-    const head = `[QQ 未唤醒期间聊天记录 · 最近 ${lines.length} 条${omitted > 0 ? `（更早的 ${omitted} 条已省略）` : ''}]`
-    return `${head}\n${lines.join('\n')}\n[记录结束]\n\n`
+    const head =
+      `[QQ 未唤醒期间聊天记录 · 最近 ${lines.length} 条` +
+      `${omitted > 0 ? `（更早的 ${omitted} 条已省略）` : ''}` +
+      `${images.length > 0 ? `（含 ${images.length} 张图片，按时间顺序附在消息后面）` : ''}]`
+    return { text: `${head}\n${lines.join('\n')}\n[记录结束]\n\n`, images }
   }
 
   function makeMessage(text, extraBlocks = []) {
@@ -405,29 +427,33 @@ export function apply(ctx, config) {
    */
   async function loadImageBlocks(images) {
     const list = Array.isArray(images) ? images : []
-    if (list.length === 0) return []
+    if (list.length === 0) return { blocks: [], failures: [] }
     const attachments = ctx.get('attachments')
     if (!attachments) {
-      logger.warn('没有 attachments 服务，图片仍只以 [图片] 占位符呈现')
-      return []
+      return { blocks: [], failures: list.map(() => '没有 attachments 服务') }
     }
     const limit = Math.min(list.length, attachments.imageLimits?.maxImagesPerMessage ?? 4)
     const blocks = []
+    const failures = []
     for (const item of list.slice(0, limit)) {
       try {
         const res = await fetch(item.url, { signal: AbortSignal.timeout(20000) })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data = Buffer.from(await res.arrayBuffer())
         const mediaType = sniffImageMediaType(data)
-        if (!mediaType) throw new Error('不是可识别的图片格式')
+        if (!mediaType) throw new Error(`不是可识别的图片（${data.length} 字节）`)
         const ref = await attachments.saveImage({ data, mediaType, name: item.name || undefined })
         blocks.push({ type: 'image', attachment: ref })
       } catch (error) {
-        logger.warn(`图片附件失败（退回占位符）：${error?.message ?? error}`)
+        const reason = `${String(item.url).slice(0, 80)} -> ${error?.message ?? error}`
+        failures.push(reason)
+        logger.warn(`图片附件失败（退回占位符）：${reason}`)
       }
     }
     if (blocks.length > 0) logger.info(`已附加 ${blocks.length} 张图片`)
-    return blocks
+    // 失败原因也记进审计日志，方便事后从状态文件里查。
+    if (failures.length > 0) pushLog({ kind: 'image', outcome: 'failed', count: failures.length, reason: failures[0].slice(0, 180) })
+    return { blocks, failures }
   }
 
   /** 记住「这条消息是谁从哪儿发的」，出站回复用它当目的地。 */
@@ -462,6 +488,8 @@ export function apply(ctx, config) {
         groupId: msg.groupId ?? null,
         groupName: msg.groupName ?? null,
         text: truncateText(msg.text, MAX_BUFFER_ITEM_CHARS),
+        // 图片只存 URL —— 缓冲保持"零模型调用、几乎零开销"，下载推迟到唤醒时。
+        images: Array.isArray(msg.images) ? msg.images.slice(0, MAX_BUFFER_IMAGES_PER_ITEM) : [],
       })
       if (state.buffer.length > MAX_BUFFER) state.buffer = state.buffer.slice(-MAX_BUFFER)
       saveState()
@@ -469,9 +497,12 @@ export function apply(ctx, config) {
     }
 
     const agent = await ensureTargetAgent()
-    const text = `${renderDigest(s)}${renderInbound(msg, s)}`
-    // 图片：尽量下载成真正的附件，让目标会话"看得见"；失败就只留 [图片] 占位符。
-    const imageBlocks = await loadImageBlocks(msg.images)
+    const digest = renderDigest(s)
+    let text = `${digest.text}${renderInbound(msg, s)}`
+    // 图片：缓冲里攒下的 + 本条消息的，一起下载成真正的附件。
+    // 失败就只留 [图片] 占位符，但把**失败原因**附在正文里 —— 否则"看不见图"对模型完全不可观测。
+    const { blocks: imageBlocks, failures } = await loadImageBlocks([...digest.images, ...(msg.images ?? [])])
+    if (failures.length > 0) text += `\n（有 ${failures.length} 张图片没能取到，原因：${failures[0]}）`
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
     const send = () => agent.followup(makeMessage(text, imageBlocks))
