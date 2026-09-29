@@ -11,7 +11,8 @@
 //     出站文本按 replyMaxChars 分段发给「最后一次入站的目的地」。
 //     传输细节（内置 WebSocket、token 走查询串、退避重连）全部封装在 onebot.js。
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -55,8 +56,11 @@ const MAX_BUFFER_ITEM_CHARS = 500
 const MAX_DIGEST_CHARS = 1200
 /** 单条缓冲消息最多存几个图片 URL。 */
 const MAX_BUFFER_IMAGES_PER_ITEM = 2
-/** 一次唤醒最多从缓冲里带几张图（真正的硬上限在 attachments.imageLimits）。 */
-const MAX_BUFFER_IMAGES_TOTAL = 4
+/** 一次唤醒最多从缓冲里带几张图（用户定的：10 张够用；真正的硬上限仍在 attachments.imageLimits）。 */
+const MAX_BUFFER_IMAGES_TOTAL = 10
+/** 图片本地缓存：容量上限，超出就淘汰最旧的（用户提议的方案）。 */
+const MAX_IMAGE_CACHE_BYTES = 64 * 1024 * 1024
+const MAX_IMAGE_CACHE_FILES = 300
 /** 摘要默认取最近几条（`recentChatLimit` 的默认值）。 */
 const DEFAULT_RECENT_CHAT_LIMIT = 8
 
@@ -421,37 +425,98 @@ export function apply(ctx, config) {
     return null
   }
 
+  // 图片本地缓存目录：**收到图片就落盘**（纯 I/O，不调用模型），唤醒时直接读文件。
+  // 这样既保住了缓冲"零模型调用"的性质，又不怕 QQ 的图片 URL 过期。
+  const imageCacheDir = join(home, 'qq-bridge-images')
+
+  function listImageCache() {
+    try {
+      return readdirSync(imageCacheDir)
+        .map((name) => {
+          const path = join(imageCacheDir, name)
+          try {
+            const st = statSync(path)
+            return { name, path, size: st.size, at: st.mtimeMs }
+          } catch {
+            return null
+          }
+        })
+        .filter(Boolean)
+    } catch {
+      return []
+    }
+  }
+
+  /** 超出容量/张数就删最旧的（按 mtime）。 */
+  function evictImageCache() {
+    try {
+      const files = listImageCache().sort((a, b) => a.at - b.at) // 最旧在前
+      let total = files.reduce((n, f) => n + f.size, 0)
+      let count = files.length
+      for (const f of files) {
+        if (total <= MAX_IMAGE_CACHE_BYTES && count <= MAX_IMAGE_CACHE_FILES) break
+        try {
+          rmSync(f.path, { force: true })
+          total -= f.size
+          count -= 1
+        } catch {
+          /* 删不掉就算了，下次再试 */
+        }
+      }
+    } catch (error) {
+      logger.warn(`图片缓存清理失败：${error?.message ?? error}`)
+    }
+  }
+
   /**
-   * 把 QQ 图片下载成 DSH 附件，返回可直接放进消息里的 image 内容块。
-   * **任何一步失败都只是少一张图**，绝不影响文本与策略判定（优雅退回 [图片] 占位符）。
+   * 下载一张图并落到本地缓存。**只下载，不调用模型**（保住缓冲的零开销性质）。
+   * @returns {{path: string, mediaType: string, bytes: number} | null}
    */
-  async function loadImageBlocks(images) {
-    const list = Array.isArray(images) ? images : []
+  async function cacheImage(item) {
+    try {
+      if (!item?.url) return null
+      mkdirSync(imageCacheDir, { recursive: true })
+      const res = await fetch(item.url, { signal: AbortSignal.timeout(20000) })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = Buffer.from(await res.arrayBuffer())
+      const mediaType = sniffImageMediaType(data)
+      if (!mediaType) throw new Error(`不是可识别的图片（${data.length} 字节）`)
+      const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[mediaType]
+      const path = join(imageCacheDir, `${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`)
+      writeFileSync(path, data)
+      evictImageCache()
+      return { path, mediaType, bytes: data.length }
+    } catch (error) {
+      logger.warn(`图片缓存失败：${String(item?.url).slice(0, 80)} -> ${error?.message ?? error}`)
+      return null
+    }
+  }
+
+  /**
+   * 把缓存里的图片读出来交给附件服务，返回可直接放进消息里的 image 内容块。
+   * **任何一步失败都只是少一张图**，绝不影响文本与策略判定。
+   */
+  async function loadImageBlocks(cached) {
+    const list = Array.isArray(cached) ? cached : []
     if (list.length === 0) return { blocks: [], failures: [] }
     const attachments = ctx.get('attachments')
-    if (!attachments) {
-      return { blocks: [], failures: list.map(() => '没有 attachments 服务') }
-    }
+    if (!attachments) return { blocks: [], failures: list.map(() => '没有 attachments 服务') }
     const limit = Math.min(list.length, attachments.imageLimits?.maxImagesPerMessage ?? 4)
     const blocks = []
     const failures = []
     for (const item of list.slice(0, limit)) {
       try {
-        const res = await fetch(item.url, { signal: AbortSignal.timeout(20000) })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const data = Buffer.from(await res.arrayBuffer())
-        const mediaType = sniffImageMediaType(data)
-        if (!mediaType) throw new Error(`不是可识别的图片（${data.length} 字节）`)
-        const ref = await attachments.saveImage({ data, mediaType, name: item.name || undefined })
+        if (!item?.path || !existsSync(item.path)) throw new Error('缓存文件已不存在（可能已被淘汰）')
+        const data = readFileSync(item.path)
+        const ref = await attachments.saveImage({ data, mediaType: item.mediaType, name: item.name || undefined })
         blocks.push({ type: 'image', attachment: ref })
       } catch (error) {
-        const reason = `${String(item.url).slice(0, 80)} -> ${error?.message ?? error}`
+        const reason = `${String(item?.path ?? '?')} -> ${error?.message ?? error}`
         failures.push(reason)
         logger.warn(`图片附件失败（退回占位符）：${reason}`)
       }
     }
     if (blocks.length > 0) logger.info(`已附加 ${blocks.length} 张图片`)
-    // 失败原因也记进审计日志，方便事后从状态文件里查。
     if (failures.length > 0) pushLog({ kind: 'image', outcome: 'failed', count: failures.length, reason: failures[0].slice(0, 180) })
     return { blocks, failures }
   }
@@ -480,6 +545,16 @@ export function apply(ctx, config) {
 
     if (d.action === 'drop') return { ...d, delivered: false }
 
+    // 图片：非丢弃的消息就把图**落盘缓存**（纯 I/O，不调用模型）。
+    // 唤醒时直接读文件 —— 既保住缓冲"零模型调用"的性质，也不怕 QQ 的图片 URL 过期。
+    const cachedImages = []
+    if (Array.isArray(msg.images)) {
+      for (const item of msg.images.slice(0, MAX_BUFFER_IMAGES_PER_ITEM)) {
+        const cached = await cacheImage(item)
+        if (cached) cachedImages.push(cached)
+      }
+    }
+
     if (d.action === 'record') {
       state.buffer.push({
         at: Date.now(),
@@ -488,8 +563,8 @@ export function apply(ctx, config) {
         groupId: msg.groupId ?? null,
         groupName: msg.groupName ?? null,
         text: truncateText(msg.text, MAX_BUFFER_ITEM_CHARS),
-        // 图片只存 URL —— 缓冲保持"零模型调用、几乎零开销"，下载推迟到唤醒时。
-        images: Array.isArray(msg.images) ? msg.images.slice(0, MAX_BUFFER_IMAGES_PER_ITEM) : [],
+        // 图片在收到时就已落盘，这里只存本地路径（不再是会过期的 URL）。
+        images: cachedImages,
       })
       if (state.buffer.length > MAX_BUFFER) state.buffer = state.buffer.slice(-MAX_BUFFER)
       saveState()
@@ -501,7 +576,7 @@ export function apply(ctx, config) {
     let text = `${digest.text}${renderInbound(msg, s)}`
     // 图片：缓冲里攒下的 + 本条消息的，一起下载成真正的附件。
     // 失败就只留 [图片] 占位符，但把**失败原因**附在正文里 —— 否则"看不见图"对模型完全不可观测。
-    const { blocks: imageBlocks, failures } = await loadImageBlocks([...digest.images, ...(msg.images ?? [])])
+    const { blocks: imageBlocks, failures } = await loadImageBlocks([...digest.images, ...cachedImages])
     if (failures.length > 0) text += `\n（有 ${failures.length} 张图片没能取到，原因：${failures[0]}）`
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
