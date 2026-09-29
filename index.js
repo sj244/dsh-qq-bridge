@@ -481,11 +481,11 @@ export function apply(ctx, config) {
   async function describeImage(cached) {
     const llm = ctx.get('llm')
     const attachments = ctx.get('attachments')
-    if (!llm || !attachments) return null
+    if (!llm || !attachments) return { ok: false, reason: '没有 llm / attachments 服务' }
     try {
-      if (!cached?.path || !existsSync(cached.path)) return null
+      if (!cached?.path || !existsSync(cached.path)) return { ok: false, reason: '缓存文件不存在' }
       const conf = await findVisionModel()
-      if (!conf) return null
+      if (!conf) return { ok: false, reason: '没找到支持图片输入的模型' }
       const ref = await attachments.saveImage({
         data: readFileSync(cached.path),
         mediaType: cached.mediaType,
@@ -502,14 +502,23 @@ export function apply(ctx, config) {
         source: { kind: 'plugin', plugin: PLUGIN_TAG },
       })
       let out = ''
+      let finish = ''
       for await (const chunk of llm.stream({ provider: conf.provider, model: conf.model, messages: [message], maxTokens: 300 })) {
         if (chunk.type === 'text-delta') out += chunk.text
-        if (chunk.type === 'finish') break
+        if (chunk.type === 'finish') {
+          finish = chunk.reason?.kind ?? ''
+          if (finish === 'error' || finish === 'aborted') {
+            return { ok: false, reason: `模型返回 ${finish}${chunk.reason?.failure?.message ? '：' + chunk.reason.failure.message : ''}` }
+          }
+          break
+        }
       }
-      return out.trim() || null
+      const text = out.trim()
+      return text ? { ok: true, text } : { ok: false, reason: `模型返回空内容（finish=${finish || '?'}）` }
     } catch (error) {
-      logger.warn(`图片描述失败：${error?.message ?? error}`)
-      return null
+      const reason = error?.message ?? String(error)
+      logger.warn(`图片描述失败：${reason}`)
+      return { ok: false, reason }
     }
   }
 
@@ -680,8 +689,8 @@ export function apply(ctx, config) {
     if (toDescribe.length > 0) {
       const notes = []
       for (let i = 0; i < toDescribe.length; i++) {
-        const desc = await describeImage(toDescribe[i])
-        notes.push(desc ? `[图片${i + 1}] ${desc}` : `[图片${i + 1}] （描述失败）`)
+        const r = await describeImage(toDescribe[i])
+        notes.push(r.ok ? `[图片${i + 1}] ${r.text}` : `[图片${i + 1}] （描述失败：${r.reason}）`)
       }
       text += `\n${notes.join('\n')}`
     }
