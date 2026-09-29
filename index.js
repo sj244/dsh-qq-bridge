@@ -367,18 +367,19 @@ export function apply(ctx, config) {
     return `${base}\n（回 QQ 请只把要对群里说的话放进 [QQ]…[/QQ]，其余内容不会发出去）`
   }
 
-  function renderDigest(s) {
-    if (!s.attachRecentChat || state.buffer.length === 0) return { text: '', images: [] }
-    const items = state.buffer.slice(-s.recentChatLimit)
-    if (items.length === 0) return { text: '', images: [] }
+  function renderDigest(s, items) {
+    const list = Array.isArray(items) ? items : state.buffer
+    if (!s.attachRecentChat || list.length === 0) return { text: '', images: [] }
+    const picked = list.slice(-s.recentChatLimit)
+    if (picked.length === 0) return { text: '', images: [] }
 
     // 从**最新**往回装，总长封顶 —— 装不下的更早消息直接省略，
     // 并且至少保留一条（哪怕那一条本身超长，也要截断后留下）。
     const lines = []
     const included = []
     let budget = MAX_DIGEST_CHARS
-    for (let i = items.length - 1; i >= 0; i--) {
-      const m = items[i]
+    for (let i = picked.length - 1; i >= 0; i--) {
+      const m = picked[i]
       const line = `${m.nickname || m.userId || '未知'}${m.groupName ? `@${m.groupName}` : ''}: ${m.text}`
       if (line.length > budget) {
         if (lines.length === 0) {
@@ -403,7 +404,7 @@ export function apply(ctx, config) {
       if (images.length >= MAX_BUFFER_IMAGES_TOTAL) break
     }
 
-    const omitted = items.length - lines.length
+    const omitted = picked.length - lines.length
     const head =
       `[QQ 未唤醒期间聊天记录 · 最近 ${lines.length} 条` +
       `${omitted > 0 ? `（更早的 ${omitted} 条已省略）` : ''}` +
@@ -632,6 +633,12 @@ export function apply(ctx, config) {
 
     if (d.action === 'drop') return { ...d, delivered: false }
 
+    // ⚠️ **在任何 await 之前**快照缓冲。
+    // 唤醒路径后面要下载图片、还要调多模态模型写描述（好几秒），
+    // 这期间新到的消息会继续进缓冲 —— 结束时如果一把 `buffer = []`，
+    // 就会把它们一起吞掉（真机上出现过"发三张图只处理了一张"）。
+    const bufferSnapshot = state.buffer.slice()
+
     // 图片：非丢弃的消息就把图**落盘缓存**（纯 I/O，不调用模型）。
     // 唤醒时直接读文件 —— 既保住缓冲"零模型调用"的性质，也不怕 QQ 的图片 URL 过期。
     const cachedImages = []
@@ -659,7 +666,7 @@ export function apply(ctx, config) {
     }
 
     const agent = await ensureTargetAgent()
-    const digest = renderDigest(s)
+    const digest = renderDigest(s, bufferSnapshot)
     let text = `${digest.text}${renderInbound(msg, s)}`
     // 图片：缓冲里攒下的 + 本条消息的，一起下载成真正的附件。
     // 失败就只留 [图片] 占位符，但把**失败原因**附在正文里 —— 否则"看不见图"对模型完全不可观测。
@@ -686,7 +693,9 @@ export function apply(ctx, config) {
     } catch {
       send()
     }
-    state.buffer = [] // 已作为本轮上下文附上，清空避免重复
+    // 只移除**确实进了这次摘要**的那些条目（按对象身份），
+    // 期间新到的消息要留在缓冲里等下一次唤醒。
+    state.buffer = state.buffer.filter((m) => !bufferSnapshot.includes(m))
     saveState()
     logger.info(`woke target session (${d.reason})`)
     return { ...d, delivered: true, sessionId: agent.session?.id ?? null }
