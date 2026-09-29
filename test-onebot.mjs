@@ -433,6 +433,41 @@ check(
   JSON.stringify(quoted?.params?.message?.[0] ?? null),
 )
 
+// 9.5) 摘要上限：灌一批长消息后唤醒，附上的摘要必须被限额、并注明省略了几条
+{
+  state.resolvedSettings.recentChatLimit = 20 // 故意要 20 条，看总额度管不管得住
+  const filler = 'F'.repeat(400)
+  for (let i = 0; i < 10; i++) {
+    mock.sendEvent({
+      post_type: 'message',
+      message_type: 'private',
+      user_id: 1001,
+      self_id: 10001,
+      raw_message: filler,
+      message: [{ type: 'text', data: { text: filler } }],
+      sender: { nickname: '灌水怪' },
+    })
+  }
+  await sleep(800)
+  const beforeN = state.followups.length
+  mock.sendEvent({
+    post_type: 'message',
+    message_type: 'private',
+    user_id: 1001,
+    self_id: 10001,
+    message_id: 777,
+    raw_message: '244',
+    message: [{ type: 'text', data: { text: '244' } }],
+    sender: { nickname: '灌水怪' },
+  })
+  await waitFor(() => state.followups.length > beforeN)
+  const wake = textOf(state.followups[state.followups.length - 1])
+  const m = wake.match(/\[QQ 未唤醒期间聊天记录[^\n]*\n([\s\S]*?)\n\[记录结束\]/)
+  check('摘要被附上', Boolean(m), wake.slice(0, 60))
+  check('摘要注明省略了更早的消息', /已省略/.test(wake), (wake.match(/最近 \d+ 条[^\]]*\]/) || [''])[0])
+  check('摘要正文不超过 1200 字', !m || m[1].length <= 1200, m ? `${m[1].length} 字` : 'n/a')
+}
+
 // 10) 卸载：传输必须干净停掉
 for (const d of state.disposers) await d()
 check('dispose 后连接已关闭', await waitFor(() => mock.connected === false, 2000))

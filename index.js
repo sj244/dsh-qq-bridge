@@ -50,8 +50,11 @@ const MAX_OUTBOX = 50
 const MAX_INBOUND_CHARS = 4000
 /** 单条消息**进缓冲**的上限 —— 缓冲是"闲聊摘要"，不需要全文。 */
 const MAX_BUFFER_ITEM_CHARS = 500
-/** 整个"未唤醒聊天摘要"的总上限（从最新往回装，装不下就丢更早的）。 */
-const MAX_DIGEST_CHARS = 4000
+/** 整个"未唤醒聊天摘要"的总上限（从最新往回装，装不下就丢更早的）。
+ *  QQ 群闲聊很短，8 条 × 一两百字足够了；给多了纯属浪费上下文。 */
+const MAX_DIGEST_CHARS = 1200
+/** 摘要默认取最近几条（`recentChatLimit` 的默认值）。 */
+const DEFAULT_RECENT_CHAT_LIMIT = 8
 
 export const Config = Schema.object({
   targetSessionId: Schema.string().default('').description('固定目标会话 id；留空则用 settings 里的值。'),
@@ -93,7 +96,7 @@ const BridgeSettings = Schema.object({
   whitelist: Schema.array(Schema.string()).default([]),
   groupWhitelist: Schema.array(Schema.string()).default([]),
   attachRecentChat: Schema.boolean().default(true),
-  recentChatLimit: Schema.number().default(20),
+  recentChatLimit: Schema.number().default(DEFAULT_RECENT_CHAT_LIMIT),
   replyMaxChars: Schema.number().default(1500),
   // M2
   onebotUrl: Schema.string().default(''),
@@ -176,7 +179,7 @@ export function apply(ctx, config) {
       whitelist: (s.whitelist ?? []).map(String),
       groupWhitelist: (s.groupWhitelist ?? []).map(String),
       attachRecentChat: s.attachRecentChat !== false,
-      recentChatLimit: Math.max(0, Math.min(200, Number(s.recentChatLimit ?? 20))),
+      recentChatLimit: Math.max(0, Math.min(200, Number(s.recentChatLimit ?? DEFAULT_RECENT_CHAT_LIMIT))),
       replyMaxChars: Math.max(100, Number(s.replyMaxChars ?? 1500)),
       onebotUrl: String(s.onebotUrl ?? config.onebotUrl ?? '').trim(),
       accessTokenEnv: String(s.accessTokenEnv ?? config.accessTokenEnv ?? '').trim(),
