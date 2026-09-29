@@ -46,6 +46,12 @@ const PLUGIN_TAG = 'qq-bridge'
 const MAX_BUFFER = 200
 const MAX_LOG = 200
 const MAX_OUTBOX = 50
+/** 单条**入站**消息进模型上下文的上限（防有人贴一篇长文把上下文撑爆）。 */
+const MAX_INBOUND_CHARS = 4000
+/** 单条消息**进缓冲**的上限 —— 缓冲是"闲聊摘要"，不需要全文。 */
+const MAX_BUFFER_ITEM_CHARS = 500
+/** 整个"未唤醒聊天摘要"的总上限（从最新往回装，装不下就丢更早的）。 */
+const MAX_DIGEST_CHARS = 4000
 
 export const Config = Schema.object({
   targetSessionId: Schema.string().default('').description('固定目标会话 id；留空则用 settings 里的值。'),
@@ -308,7 +314,8 @@ export function apply(ctx, config) {
   function renderInbound(msg, s) {
     const who = msg.nickname || msg.userName || msg.userId || '未知'
     const where = msg.groupName ? `${msg.groupName}` : '私聊'
-    const base = `[QQ · ${where}] ${who}：${String(msg.text ?? '')}`
+    // 单条入站也要封顶：有人贴一篇长文过来，不该把上下文整片吃掉。
+    const base = `[QQ · ${where}] ${who}：${truncateText(msg.text, MAX_INBOUND_CHARS)}`
     // 只有 marker 模式才提示；always 模式没有要守的规矩。
     if (s?.replyMode === 'always') return base
     return `${base}\n（回 QQ 请只把要对群里说的话放进 [QQ]…[/QQ]，其余内容不会发出去）`
@@ -318,8 +325,26 @@ export function apply(ctx, config) {
     if (!s.attachRecentChat || state.buffer.length === 0) return ''
     const items = state.buffer.slice(-s.recentChatLimit)
     if (items.length === 0) return ''
-    const lines = items.map((m) => `${m.nickname || m.userId || '未知'}${m.groupName ? `@${m.groupName}` : ''}: ${m.text}`)
-    return `[QQ 未唤醒期间聊天记录 · 最近 ${items.length} 条]\n${lines.join('\n')}\n[记录结束]\n\n`
+
+    // 从**最新**往回装，总长封顶 —— 装不下的更早消息直接省略，
+    // 并且至少保留一条（哪怕那一条本身超长，也要截断后留下）。
+    const lines = []
+    let budget = MAX_DIGEST_CHARS
+    for (let i = items.length - 1; i >= 0; i--) {
+      const m = items[i]
+      const line = `${m.nickname || m.userId || '未知'}${m.groupName ? `@${m.groupName}` : ''}: ${m.text}`
+      if (line.length > budget) {
+        if (lines.length === 0) lines.unshift(truncateText(line, Math.max(0, budget)))
+        break
+      }
+      lines.unshift(line)
+      budget -= line.length + 1
+    }
+    if (lines.length === 0) return ''
+
+    const omitted = items.length - lines.length
+    const head = `[QQ 未唤醒期间聊天记录 · 最近 ${lines.length} 条${omitted > 0 ? `（更早的 ${omitted} 条已省略）` : ''}]`
+    return `${head}\n${lines.join('\n')}\n[记录结束]\n\n`
   }
 
   function makeMessage(text) {
@@ -360,7 +385,7 @@ export function apply(ctx, config) {
         nickname: msg.nickname ?? null,
         groupId: msg.groupId ?? null,
         groupName: msg.groupName ?? null,
-        text: String(msg.text ?? ''),
+        text: truncateText(msg.text, MAX_BUFFER_ITEM_CHARS),
       })
       if (state.buffer.length > MAX_BUFFER) state.buffer = state.buffer.slice(-MAX_BUFFER)
       saveState()
@@ -684,6 +709,11 @@ export function apply(ctx, config) {
           transport: transport.status(),
           lastDestination: state.lastDestination,
           bufferedUnwoken: state.buffer.length,
+          recentBuffer: state.buffer.slice(-3).map((m) => ({
+            who: m.nickname || m.userId || null,
+            len: String(m.text ?? '').length,
+            text: String(m.text ?? '').slice(0, 80),
+          })),
           recentLog: state.log.slice(-15),
           recentOutbox: state.outbox.slice(-3),
           statePath,
@@ -981,4 +1011,14 @@ export function extractQQReply(text) {
     if (piece !== '') out.push(piece)
   }
   return out.join('\n\n')
+}
+
+/**
+ * 按字符数封顶，超长就截断并留个明确标记（不要静默丢内容）。
+ * 导出是为了可测试。
+ */
+export function truncateText(text, max) {
+  const s = String(text ?? '')
+  if (!Number.isFinite(max) || max <= 0) return ''
+  return s.length <= max ? s : `${s.slice(0, max)}…（已截断）`
 }

@@ -2,7 +2,13 @@
 //  (1) apply 不抛错、注册了 2 个调试工具；
 //  (2) 唤醒策略三条分支（白名单外丢弃 / 昵称必唤醒 / 其余按概率）；
 // 运行：node test-smoke.mjs
-import { apply, extractQQReply } from './index.js'
+import { existsSync, rmSync } from 'node:fs'
+import { apply, extractQQReply, truncateText } from './index.js'
+
+// 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
+// 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
+const statePath = process.env.TEMP + '/qq-bridge-smoke.json'
+if (existsSync(statePath)) rmSync(statePath, { force: true })
 
 const registered = []
 const warnings = []
@@ -25,7 +31,7 @@ const ctx = {
 const config = {
   targetSessionId: 'session-smoke',
   agentPreset: '',
-  statePath: process.env.TEMP + '/qq-bridge-smoke.json',
+  statePath,
   debugTools: true,
   // ⚠️ 必须显式指向一个**不存在**的目录：否则测试结果会依赖本机
   // $DSH_HOME/napcat 的真实状态（那里装过 NapCat 的话，"未安装时 launch 报错"
@@ -113,6 +119,33 @@ if (sim) {
   check('大小写 / 跨行都认', extractQQReply('[qq]\n跨行内容\n[/QQ]') === '跨行内容')
   check('未闭合 → 不发', extractQQReply('[QQ]没有结尾') === '')
   check('空输入安全', extractQQReply(undefined) === '')
+}
+
+// 上下文上限：别让群里的长文把上下文撑爆
+{
+  check('短文本不动', truncateText('你好', 500) === '你好')
+  check('恰好等于上限不动', truncateText('x'.repeat(500), 500).length === 500)
+  const cut = truncateText('x'.repeat(3000), 500)
+  check('超长被截断并留标记', cut.length === 500 + '…（已截断）'.length && cut.endsWith('…（已截断）'), `len=${cut.length}`)
+  check('max<=0 返回空', truncateText('abc', 0) === '')
+  check('非数字 max 返回空', truncateText('abc', undefined) === '')
+
+  // 这一段要的是 record 分支：先把唤醒概率压成 0，
+  // 否则 210 条里会有约 10 条抽中 5% 唤醒，而假 ctx 没有 agent 工厂会直接抛错。
+  resolvedSettings.wakeProbability = 0
+
+  // 走一遍真实入站：贴一篇长文，缓冲里存下的必须是**截断后**的
+  const long = 'A'.repeat(3000)
+  await sim.execute({ text: long, userId: 'test-user', nickname: '长文怪' })
+  const st = JSON.parse(await status.execute({}))
+  const last = st.recentBuffer[st.recentBuffer.length - 1]
+  check('长文进缓冲时被截断（不是 3000）', last.len <= 500 + '…（已截断）'.length, `存下 ${last.len} 字符`)
+  check('缓冲条数被记录', st.bufferedUnwoken >= 1, `${st.bufferedUnwoken} 条`)
+
+  // 条数上限 200：灌 210 条
+  for (let i = 0; i < 210; i++) await sim.execute({ text: `灌水第${i}条`, userId: 'test-user' })
+  const st2 = JSON.parse(await status.execute({}))
+  check('缓冲条数封顶 200', st2.bufferedUnwoken === 200, `实际 ${st2.bufferedUnwoken}`)
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
