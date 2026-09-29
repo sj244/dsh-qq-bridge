@@ -349,24 +349,47 @@ const onSessionEvent = state.listeners.get('session/event')
 check('session/event 监听已注册', typeof onSessionEvent === 'function')
 
 mock.actions.length = 0
+// 7a) 没有 [QQ] 标记 → 一个字都不该发出去
 onSessionEvent(
   { id: 'session-target' },
   {
     type: 'assistant/message',
     seq: 1,
     time: Date.now(),
-    data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '**你好**，我是 244' }] } },
+    data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '这些技术说明不该进群' }] } },
   },
 )
 onSessionEvent(
   { id: 'session-target' },
   { type: 'turn/end', seq: 2, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } },
 )
+await sleep(400)
+check('无 [QQ] 标记 → 不发送', mock.actions.filter((a) => a.action === 'send_private_msg').length === 0)
+
+// 7b) 有标记 → 只发块内内容，块外的文字不发
+onSessionEvent(
+  { id: 'session-target' },
+  {
+    type: 'assistant/message',
+    seq: 3,
+    time: Date.now(),
+    data: {
+      turn: 2,
+      step: 1,
+      message: { content: [{ type: 'text', text: '先说一堆给 DSH 看的技术细节。\n[QQ]**你好**，我是 244[/QQ]\n后面还有一堆废话。' }] },
+    },
+  },
+)
+onSessionEvent(
+  { id: 'session-target' },
+  { type: 'turn/end', seq: 4, time: Date.now(), data: { turn: 2, reason: { kind: 'completed' } } },
+)
 const sentOk = await waitFor(() => mock.actions.some((a) => a.action === 'send_private_msg'))
 check('出站发到私聊', sentOk)
 const first = mock.actions.find((a) => a.action === 'send_private_msg')
 check('目的地 = 最后一次入站发送者', String(first?.params?.user_id) === '1001', JSON.stringify(first?.params?.user_id))
 const outText = (first?.params?.message ?? []).map((s) => s.data?.text ?? '').join('')
+check('只发标记块内的内容', !outText.includes('技术细节') && !outText.includes('废话'), outText)
 check('Markdown 标记已去除', !outText.includes('**') && outText.includes('你好'), outText)
 
 // 8) 长回复按 replyMaxChars 分段
@@ -377,11 +400,11 @@ mock.actions.length = 0
 const longText = Array.from({ length: 20 }, (_, i) => `第${i + 1}行内容`).join('\n')
 onSessionEvent(
   { id: 'session-target' },
-  { type: 'assistant/message', seq: 3, time: Date.now(), data: { turn: 2, step: 1, message: { content: [{ type: 'text', text: longText }] } } },
+  { type: 'assistant/message', seq: 5, time: Date.now(), data: { turn: 3, step: 1, message: { content: [{ type: 'text', text: `[QQ]${longText}[/QQ]` }] } } },
 )
 onSessionEvent(
   { id: 'session-target' },
-  { type: 'turn/end', seq: 4, time: Date.now(), data: { turn: 2, reason: { kind: 'completed' } } },
+  { type: 'turn/end', seq: 6, time: Date.now(), data: { turn: 3, reason: { kind: 'completed' } } },
 )
 await waitFor(() => mock.actions.filter((a) => a.action === 'send_private_msg').length >= 2)
 const chunks = mock.actions.filter((a) => a.action === 'send_private_msg')
@@ -396,11 +419,11 @@ state.resolvedSettings.replyWithQuote = true
 mock.actions.length = 0
 onSessionEvent(
   { id: 'session-target' },
-  { type: 'assistant/message', seq: 5, time: Date.now(), data: { turn: 3, step: 1, message: { content: [{ type: 'text', text: '好' }] } } },
+  { type: 'assistant/message', seq: 7, time: Date.now(), data: { turn: 4, step: 1, message: { content: [{ type: 'text', text: '[QQ]好[/QQ]' }] } } },
 )
 onSessionEvent(
   { id: 'session-target' },
-  { type: 'turn/end', seq: 6, time: Date.now(), data: { turn: 3, reason: { kind: 'completed' } } },
+  { type: 'turn/end', seq: 8, time: Date.now(), data: { turn: 4, reason: { kind: 'completed' } } },
 )
 await waitFor(() => mock.actions.some((a) => a.action === 'send_private_msg'))
 const quoted = mock.actions.find((a) => a.action === 'send_private_msg')

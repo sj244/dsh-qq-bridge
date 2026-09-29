@@ -2,7 +2,7 @@
 //  (1) apply 不抛错、注册了 2 个调试工具；
 //  (2) 唤醒策略三条分支（白名单外丢弃 / 昵称必唤醒 / 其余按概率）；
 // 运行：node test-smoke.mjs
-import { apply } from './index.js'
+import { apply, extractQQReply } from './index.js'
 
 const registered = []
 const warnings = []
@@ -102,6 +102,17 @@ if (sim) {
   check('未知 action 返回错误而非抛异常', typeof bad.error === 'string', bad.error)
   const cannotLaunch = JSON.parse(await nap.execute({ action: 'launch' }))
   check('未安装时 launch 明确报错', typeof cannotLaunch.error === 'string' && cannotLaunch.error.includes('download'), cannotLaunch.error)
+}
+
+// 出站闸门：默认只发 [QQ]…[/QQ] 里的内容（否则整轮技术说明都会倒进群里）
+{
+  check('无标记 → 一个字都不发', extractQQReply('这些技术说明不该进群') === '')
+  check('单块 → 只取块内', extractQQReply('前言\n[QQ]在的 👻[/QQ]\n后记') === '在的 👻')
+  check('多块 → 按顺序拼接', extractQQReply('[QQ]第一句[/QQ] 中间 [QQ]第二句[/QQ]') === '第一句\n\n第二句')
+  check('空块 → 忽略', extractQQReply('[QQ]   [/QQ]') === '')
+  check('大小写 / 跨行都认', extractQQReply('[qq]\n跨行内容\n[/QQ]') === '跨行内容')
+  check('未闭合 → 不发', extractQQReply('[QQ]没有结尾') === '')
+  check('空输入安全', extractQQReply(undefined) === '')
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)

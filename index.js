@@ -59,6 +59,7 @@ export const Config = Schema.object({
   replyWithQuote: Schema.boolean().default(false).description('回复时引用触发那条消息（[CQ:reply]）。'),
   atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
   stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
+  replyMode: Schema.string().default('marker').description("出站模式：'marker'（默认，只发 [QQ]…[/QQ] 里的内容）或 'always'（整轮回复都发，旧行为）。"),
   heartbeatTimeoutMs: Schema.number().default(90000).description('多久没有任何 WS 流量就判定连接已死并重连。'),
   // ── M5：NapCat 自助托管 ───────────────────────────────────────────────────
   // 注意：这些只是**参数**；插件加载时绝不下载或执行任何东西，
@@ -95,6 +96,7 @@ const BridgeSettings = Schema.object({
   replyWithQuote: Schema.boolean().default(false),
   atOnlyInGroup: Schema.boolean().default(false),
   stripMarkdown: Schema.boolean().default(true),
+  replyMode: Schema.string().default('marker'),
   // M5
   napcatInstallDir: Schema.string().default(''),
   napcatVersion: Schema.string().default(''),
@@ -143,6 +145,7 @@ export function apply(ctx, config) {
       replyWithQuote: config.replyWithQuote === true,
       atOnlyInGroup: config.atOnlyInGroup === true,
       stripMarkdown: config.stripMarkdown !== false,
+      replyMode: config.replyMode === 'always' ? 'always' : 'marker',
       napcatInstallDir: config.napcatInstallDir ?? '',
       napcatVersion: config.napcatVersion ?? '',
       downloadProxy: config.downloadProxy ?? '',
@@ -175,6 +178,7 @@ export function apply(ctx, config) {
       replyWithQuote: s.replyWithQuote === true,
       atOnlyInGroup: s.atOnlyInGroup === true,
       stripMarkdown: s.stripMarkdown !== false,
+      replyMode: s.replyMode === 'always' ? 'always' : 'marker',
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
       napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
       napcatVersion: String(s.napcatVersion ?? config.napcatVersion ?? '').trim(),
@@ -301,10 +305,13 @@ export function apply(ctx, config) {
 
   // ── 入站：QQ 消息 → 策略 → 注入 ────────────────────────────────────────────
 
-  function renderInbound(msg) {
+  function renderInbound(msg, s) {
     const who = msg.nickname || msg.userName || msg.userId || '未知'
     const where = msg.groupName ? `${msg.groupName}` : '私聊'
-    return `[QQ · ${where}] ${who}：${String(msg.text ?? '')}`
+    const base = `[QQ · ${where}] ${who}：${String(msg.text ?? '')}`
+    // 只有 marker 模式才提示；always 模式没有要守的规矩。
+    if (s?.replyMode === 'always') return base
+    return `${base}\n（回 QQ 请只把要对群里说的话放进 [QQ]…[/QQ]，其余内容不会发出去）`
   }
 
   function renderDigest(s) {
@@ -361,7 +368,7 @@ export function apply(ctx, config) {
     }
 
     const agent = await ensureTargetAgent()
-    const text = `${renderDigest(s)}${renderInbound(msg)}`
+    const text = `${renderDigest(s)}${renderInbound(msg, s)}`
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
     const send = () => agent.followup(makeMessage(text))
@@ -630,9 +637,19 @@ export function apply(ctx, config) {
 
     if (event.type === 'turn/end') {
       const kind = typeof data.reason?.kind === 'string' ? data.reason.kind : 'unknown'
-      const text = pendingReply
+      const raw = pendingReply
       pendingReply = null
-      if (!text) return
+      if (!raw) return
+
+      // 默认（replyMode='marker'）**只发 [QQ]…[/QQ] 里的内容**：整轮的技术说明、
+      // 思考过程、给 DSH 看的报告都不该倒进群里。没有标记块就一个字都不发。
+      const s = readSettings()
+      const text = s.replyMode === 'always' ? raw : extractQQReply(raw)
+      if (!text) {
+        logger.info('本轮没有 [QQ] 块，未发往 QQ')
+        return
+      }
+
       state.outbox.push({ at: Date.now(), sessionId: session.id, endReason: kind, text: text.slice(0, 4000) })
       if (state.outbox.length > MAX_OUTBOX) state.outbox = state.outbox.slice(-MAX_OUTBOX)
       saveState()
@@ -948,4 +965,20 @@ export function apply(ctx, config) {
 function clamp01(n) {
   if (!Number.isFinite(n)) return 0.05
   return Math.max(0, Math.min(1, n))
+}
+
+/**
+ * 从整轮回复里抽出**要发到 QQ** 的内容：所有 `[QQ]…[/QQ]` 块，按出现顺序拼接。
+ *
+ * 没有块就返回空串 —— 默认什么都不发。这是刻意的：DSH 会话里大量内容
+ * （技术说明、路径、思考过程）不该出现在 QQ 群里，宁可沉默也不要刷屏。
+ * 导出是为了可测试。
+ */
+export function extractQQReply(text) {
+  const out = []
+  for (const m of String(text ?? '').matchAll(/\[QQ\]([\s\S]*?)\[\/QQ\]/gi)) {
+    const piece = m[1].trim()
+    if (piece !== '') out.push(piece)
+  }
+  return out.join('\n\n')
 }
