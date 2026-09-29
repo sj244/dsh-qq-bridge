@@ -347,6 +347,23 @@ await sleep(500)
   check('纯表情包消息没被丢掉', String(lastLog?.text ?? '').includes('表情'), JSON.stringify(lastLog))
 }
 
+// 5.6) 纯图片消息：即使拿不到 attachments 服务，也不能整条丢掉
+mock.sendEvent({
+  post_type: 'message',
+  message_type: 'private',
+  user_id: 1001,
+  self_id: 10001,
+  raw_message: '[CQ:image,file=x.png,url=https://example.invalid/x.png]',
+  message: [{ type: 'image', data: { url: 'https://example.invalid/x.png', file: 'x.png' } }],
+  sender: { nickname: '小明' },
+})
+await sleep(600)
+{
+  const st = JSON.parse(await statusTool.execute({}))
+  const lastLog = st.recentLog[st.recentLog.length - 1]
+  check('纯图片消息没被丢掉（占位符兜底）', String(lastLog?.text ?? '').includes('图片'), JSON.stringify(lastLog))
+}
+
 // 6) 概率 0 的非昵称 → 只记录
 mock.sendEvent({
   post_type: 'message',

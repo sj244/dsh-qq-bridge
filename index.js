@@ -382,11 +382,52 @@ export function apply(ctx, config) {
     return `${head}\n${lines.join('\n')}\n[记录结束]\n\n`
   }
 
-  function makeMessage(text) {
+  function makeMessage(text, extraBlocks = []) {
     return createUserMessage({
-      content: [{ type: 'text', text }],
+      content: [{ type: 'text', text }, ...extraBlocks],
       source: { kind: 'plugin', plugin: PLUGIN_TAG },
     })
+  }
+
+  /** 从魔术字节判断图片类型（QQ 给的 URL 不一定带 content-type）。 */
+  function sniffImageMediaType(buf) {
+    if (!buf || buf.length < 12) return null
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
+    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg'
+    if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif'
+    if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
+    return null
+  }
+
+  /**
+   * 把 QQ 图片下载成 DSH 附件，返回可直接放进消息里的 image 内容块。
+   * **任何一步失败都只是少一张图**，绝不影响文本与策略判定（优雅退回 [图片] 占位符）。
+   */
+  async function loadImageBlocks(images) {
+    const list = Array.isArray(images) ? images : []
+    if (list.length === 0) return []
+    const attachments = ctx.get('attachments')
+    if (!attachments) {
+      logger.warn('没有 attachments 服务，图片仍只以 [图片] 占位符呈现')
+      return []
+    }
+    const limit = Math.min(list.length, attachments.imageLimits?.maxImagesPerMessage ?? 4)
+    const blocks = []
+    for (const item of list.slice(0, limit)) {
+      try {
+        const res = await fetch(item.url, { signal: AbortSignal.timeout(20000) })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = Buffer.from(await res.arrayBuffer())
+        const mediaType = sniffImageMediaType(data)
+        if (!mediaType) throw new Error('不是可识别的图片格式')
+        const ref = await attachments.saveImage({ data, mediaType, name: item.name || undefined })
+        blocks.push({ type: 'image', attachment: ref })
+      } catch (error) {
+        logger.warn(`图片附件失败（退回占位符）：${error?.message ?? error}`)
+      }
+    }
+    if (blocks.length > 0) logger.info(`已附加 ${blocks.length} 张图片`)
+    return blocks
   }
 
   /** 记住「这条消息是谁从哪儿发的」，出站回复用它当目的地。 */
@@ -429,9 +470,11 @@ export function apply(ctx, config) {
 
     const agent = await ensureTargetAgent()
     const text = `${renderDigest(s)}${renderInbound(msg, s)}`
+    // 图片：尽量下载成真正的附件，让目标会话"看得见"；失败就只留 [图片] 占位符。
+    const imageBlocks = await loadImageBlocks(msg.images)
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
-    const send = () => agent.followup(makeMessage(text))
+    const send = () => agent.followup(makeMessage(text, imageBlocks))
     try {
       ctx.agents.withInitiator(agent, send)
     } catch {
@@ -517,6 +560,8 @@ export function apply(ctx, config) {
     const userId = event.user_id === undefined || event.user_id === null ? null : String(event.user_id)
     let text = ''
     let atSelf = false
+    /** 收集到的图片（带 url），唤醒时下载成附件。 */
+    const images = []
 
     if (Array.isArray(message)) {
       const parts = []
@@ -532,6 +577,11 @@ export function apply(ctx, config) {
           else if (data.qq) parts.push(`@${data.qq} `)
           continue
         }
+        // 图片：除了占位符，还把 URL 收起来，之后下载成真正的附件给目标会话看
+        if (type === 'image') {
+          const url = data.url || data.file || ''
+          if (url) images.push({ url: String(url), name: data.file ? String(data.file).split(/[\\/]/).pop() : undefined })
+        }
         // 其余段都给个占位符：表情包、语音、视频、文件、卡片……都不能让消息凭空消失。
         const label = labelForSegment(type, data)
         if (label !== '') parts.push(label)
@@ -541,6 +591,17 @@ export function apply(ctx, config) {
       const raw = String(event.raw_message ?? message ?? '')
       // string 形态下 @ 是 CQ 码；顺便把常见 CQ 码换成可读占位符。
       if (selfId !== '' && new RegExp(`\\[CQ:at,qq=${selfId}(?:,[^\\]]*)?\\]`).test(raw)) atSelf = true
+      // 从 CQ 码里抠图片 URL（url= 优先，退 file=）
+      for (const m of raw.matchAll(/\[CQ:image,([^\]]*)\]/g)) {
+        const kv = Object.fromEntries(
+          m[1].split(',').map((p) => {
+            const i = p.indexOf('=')
+            return i < 0 ? [p, ''] : [p.slice(0, i), p.slice(i + 1)]
+          }),
+        )
+        const url = kv.url || kv.file || ''
+        if (url) images.push({ url, name: kv.file ? kv.file.split(/[\\/]/).pop() : undefined })
+      }
       text = raw
         .replace(/\[CQ:at,qq=([^,\]]+)(?:,[^\]]*)?\]/g, (_m, qq) => (selfId !== '' && String(qq) === selfId ? '' : `@${qq} `))
         .replace(/\[CQ:([a-z_]+)(?:,[^\]]*)?\]/g, (_m, key) => labelForSegment(key, null))
@@ -555,6 +616,7 @@ export function apply(ctx, config) {
       groupName: null,
       atSelf,
       messageId: event.message_id === undefined ? null : String(event.message_id),
+      images,
     }
   }
 
