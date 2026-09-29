@@ -320,13 +320,52 @@ export function apply(ctx, config) {
 
   const handles = new Map() // sessionId -> AgentHandle
 
+  /** 已经注入过用法说明的会话 id（每个会话只挂一次）。 */
+  const usagePromptMounted = new Set()
+
+  /**
+   * 把「怎么回 QQ」的说明**注入目标会话自己的系统提示**。
+   *
+   * 挂在该 agent 的 ctx 上（而不是插件根 ctx），所以只影响这一个会话，不污染别人。
+   * 好处：任何模型/会话一被挂上就立刻知道规矩，不必依赖每条入站消息里的提示。
+   */
+  function mountUsagePrompt(agent) {
+    // ⚠️ 必须从**该 agent 自己的 ctx** 取 systemPrompt 服务：Cordis 的服务按调用者作用域解析，
+    // 用插件根 ctx 取到的会把注册落到全局，污染所有会话。
+    const agentCtx = agent?.ctx
+    const sp = (agentCtx && typeof agentCtx.get === 'function' ? agentCtx.get('systemPrompt') : undefined) ?? ctx.get('systemPrompt')
+    const scopedCtx = agentCtx ?? ctx
+    if (!sp || !agent?.id) return
+    if (usagePromptMounted.has(agent.id)) return
+    usagePromptMounted.add(agent.id)
+    try {
+      scopedCtx.effect(() =>
+        sp.context({
+          name: 'qq-bridge',
+          order: 500,
+          text:
+            '你正通过 dsh-qq-bridge 接到 QQ。入站消息形如「[QQ · 群名] 昵称：内容」，' +
+            '有时前面会带一段「[QQ 未唤醒期间聊天记录]」摘要；图片会以「[图片N] <描述>」的形式给你。\n' +
+            '**要回复到 QQ，只把你希望对 QQ 说出口的内容放进 [QQ]…[/QQ] 里。**' +
+            '没有这个标记块就一个字都不会发出去 —— 所以给自己看的分析、路径、思考过程请写在标记块外面。',
+        }),
+      )
+      logger.info(`已向会话 ${agent.id} 注入 QQ 用法说明（scope=${agentCtx ? 'agent' : 'global'}）`)
+    } catch (error) {
+      logger.warn(`注入用法说明失败：${error?.message ?? error}`)
+    }
+  }
+
   async function ensureTargetAgent() {
     const s = readSettings()
     const id = s.targetSessionId
     if (!id) throw new Error('未配置 targetSessionId')
 
     const live = ctx.agents.get(id)
-    if (live) return live
+    if (live) {
+      mountUsagePrompt(live)
+      return live
+    }
 
     const held = handles.get(id)
     if (held) return held.agent
@@ -337,6 +376,7 @@ export function apply(ctx, config) {
       ...(config.agentPreset ? { setup: mountPreset } : {}),
     })
     handles.set(id, handle)
+    mountUsagePrompt(handle.agent)
     logger.info(`resumed target session ${id}`)
     return handle.agent
   }
@@ -364,7 +404,7 @@ export function apply(ctx, config) {
     const base = `[QQ · ${where}] ${who}：${truncateText(msg.text, MAX_INBOUND_CHARS)}`
     // 只有 marker 模式才提示；always 模式没有要守的规矩。
     if (s?.replyMode === 'always') return base
-    return `${base}\n（回 QQ 请只把要对群里说的话放进 [QQ]…[/QQ]，其余内容不会发出去）`
+    return `${base}\n（回 QQ 用 [QQ]…[/QQ]）`
   }
 
   function renderDigest(s, items) {
