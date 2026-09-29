@@ -77,6 +77,7 @@ export const Config = Schema.object({
   atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
   stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
   replyMode: Schema.string().default('marker').description("出站模式：'marker'（默认，只发 [QQ]…[/QQ] 里的内容）或 'always'（整轮回复都发，旧行为）。"),
+  visionModel: Schema.string().default('').description('用来给图片写描述的多模态模型，"provider/model"；留空 = 自动找第一个支持图片输入的模型。'),
   heartbeatTimeoutMs: Schema.number().default(90000).description('多久没有任何 WS 流量就判定连接已死并重连。'),
   // ── M5：NapCat 自助托管 ───────────────────────────────────────────────────
   // 注意：这些只是**参数**；插件加载时绝不下载或执行任何东西，
@@ -114,6 +115,7 @@ const BridgeSettings = Schema.object({
   atOnlyInGroup: Schema.boolean().default(false),
   stripMarkdown: Schema.boolean().default(true),
   replyMode: Schema.string().default('marker'),
+  visionModel: Schema.string().default(''),
   // M5
   napcatInstallDir: Schema.string().default(''),
   napcatVersion: Schema.string().default(''),
@@ -228,6 +230,7 @@ export function apply(ctx, config) {
       atOnlyInGroup: s.atOnlyInGroup === true,
       stripMarkdown: s.stripMarkdown !== false,
       replyMode: s.replyMode === 'always' ? 'always' : 'marker',
+      visionModel: String(s.visionModel ?? config.visionModel ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
       napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
       napcatVersion: String(s.napcatVersion ?? config.napcatVersion ?? '').trim(),
@@ -425,6 +428,90 @@ export function apply(ctx, config) {
     return null
   }
 
+  /** 一次唤醒最多给几张图做描述（每次描述 = 一次多模态调用，要控成本）。 */
+  const MAX_DESCRIBE_PER_WAKE = 3
+
+  let visionModelCache
+  /**
+   * 找一个**支持图片输入**的模型（`inputModalities` 含 `'image'`）。
+   * 设置里显式给了 `visionModel`（`provider/model`）就优先用它。结果缓存在内存。
+   */
+  async function findVisionModel() {
+    if (visionModelCache !== undefined) return visionModelCache
+    visionModelCache = null
+    const llm = ctx.get('llm')
+    if (!llm) return null
+
+    const explicit = readSettings().visionModel
+    if (explicit && explicit.includes('/')) {
+      const idx = explicit.indexOf('/')
+      visionModelCache = { provider: explicit.slice(0, idx), model: explicit.slice(idx + 1) }
+      return visionModelCache
+    }
+
+    try {
+      for (const p of llm.listProviders()) {
+        let models = []
+        try {
+          models = await llm.listModels(p.id)
+        } catch {
+          models = []
+        }
+        const hit = models.find((m) => Array.isArray(m.inputModalities) && m.inputModalities.includes('image'))
+        if (hit) {
+          visionModelCache = { provider: hit.provider ?? p.id, model: hit.id }
+          logger.info(`视觉模型：${visionModelCache.provider}/${visionModelCache.model}`)
+          return visionModelCache
+        }
+      }
+      logger.warn('没找到支持图片输入的模型；图片只能以占位符呈现')
+    } catch (error) {
+      logger.warn(`查找视觉模型失败：${error?.message ?? error}`)
+    }
+    return null
+  }
+
+  /**
+   * 用多模态模型描述一张缓存图。
+   * 这条路径很关键：目标会话的模型（如 deepseek-v4-flash）**不支持图片输入**，
+   * 插件把图附上去也会被系统剥成 "image omitted"。**描述是它唯一能"知道图里是什么"的途径。**
+   * @returns {Promise<string | null>}
+   */
+  async function describeImage(cached) {
+    const llm = ctx.get('llm')
+    const attachments = ctx.get('attachments')
+    if (!llm || !attachments) return null
+    try {
+      if (!cached?.path || !existsSync(cached.path)) return null
+      const conf = await findVisionModel()
+      if (!conf) return null
+      const ref = await attachments.saveImage({
+        data: readFileSync(cached.path),
+        mediaType: cached.mediaType,
+        name: cached.name || undefined,
+      })
+      const message = createUserMessage({
+        content: [
+          {
+            type: 'text',
+            text: '用一到两句简短的中文描述这张图片：画的是什么；如果是表情包或梗图就说它的含义；有文字的话把文字原样写出来。直接给描述，不要客套话，不要"这张图片显示了"。',
+          },
+          { type: 'image', attachment: ref },
+        ],
+        source: { kind: 'plugin', plugin: PLUGIN_TAG },
+      })
+      let out = ''
+      for await (const chunk of llm.stream({ provider: conf.provider, model: conf.model, messages: [message], maxTokens: 300 })) {
+        if (chunk.type === 'text-delta') out += chunk.text
+        if (chunk.type === 'finish') break
+      }
+      return out.trim() || null
+    } catch (error) {
+      logger.warn(`图片描述失败：${error?.message ?? error}`)
+      return null
+    }
+  }
+
   // 图片本地缓存目录：**收到图片就落盘**（纯 I/O，不调用模型），唤醒时直接读文件。
   // 这样既保住了缓冲"零模型调用"的性质，又不怕 QQ 的图片 URL 过期。
   const imageCacheDir = join(home, 'qq-bridge-images')
@@ -576,8 +663,21 @@ export function apply(ctx, config) {
     let text = `${digest.text}${renderInbound(msg, s)}`
     // 图片：缓冲里攒下的 + 本条消息的，一起下载成真正的附件。
     // 失败就只留 [图片] 占位符，但把**失败原因**附在正文里 —— 否则"看不见图"对模型完全不可观测。
-    const { blocks: imageBlocks, failures } = await loadImageBlocks([...digest.images, ...cachedImages])
+    const allImages = [...digest.images, ...cachedImages]
+    const { blocks: imageBlocks, failures } = await loadImageBlocks(allImages)
     if (failures.length > 0) text += `\n（有 ${failures.length} 张图片没能取到，原因：${failures[0]}）`
+
+    // 目标模型多半看不了图（deepseek-v4-flash 就是纯文本，附件会被系统剥成 "image omitted"）
+    // —— 所以先用多模态模型把图读成一句描述，附在正文里。这才是它能"知道图里是什么"的唯一途径。
+    const toDescribe = allImages.slice(0, MAX_DESCRIBE_PER_WAKE)
+    if (toDescribe.length > 0) {
+      const notes = []
+      for (let i = 0; i < toDescribe.length; i++) {
+        const desc = await describeImage(toDescribe[i])
+        notes.push(desc ? `[图片${i + 1}] ${desc}` : `[图片${i + 1}] （描述失败）`)
+      }
+      text += `\n${notes.join('\n')}`
+    }
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
     const send = () => agent.followup(makeMessage(text, imageBlocks))
@@ -916,6 +1016,7 @@ export function apply(ctx, config) {
           targetLoaded: Boolean(live),
           resumedHandles: [...handles.keys()],
           transport: transport.status(),
+          visionModel: (await findVisionModel()) ?? '(没找到支持图片输入的模型)',
           lastDestination: state.lastDestination,
           bufferedUnwoken: state.buffer.length,
           recentBuffer: state.buffer.slice(-3).map((m) => ({
