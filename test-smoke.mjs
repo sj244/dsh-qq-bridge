@@ -41,12 +41,14 @@ function check(label, cond, extra = '') {
 
 apply(ctx, config)
 console.log('registered tools:', registered.map((t) => t.name).join(', '))
-check('apply 未抛错且注册了 2 个工具', registered.length === 2)
+check('apply 未抛错且注册了 4 个工具', registered.length === 4)
 
 const sim = registered.find((t) => t.name === 'qq_bridge_simulate')
 const status = registered.find((t) => t.name === 'qq_bridge_status')
 check('qq_bridge_simulate 存在', !!sim)
 check('qq_bridge_status 存在', !!status)
+check('qq_bridge_send 存在（M2）', !!registered.find((t) => t.name === 'qq_bridge_send'))
+check('qq_bridge_transport 存在（M2）', !!registered.find((t) => t.name === 'qq_bridge_transport'))
 
 // status 能跑通
 if (status) {
@@ -74,6 +76,15 @@ if (sim) {
   }
   const rate = woke / N
   check('非昵称唤醒率 ≈ 5%', rate > 0.03 && rate < 0.08, `实测 ${(rate * 100).toFixed(2)}%`)
+
+  // M2：群里的额外闸门 —— atOnlyInGroup 打开后，群里没被 @ 就完全不处理
+  resolvedSettings.atOnlyInGroup = true
+  resolvedSettings.groupWhitelist = ['test-group']
+  const g1 = JSON.parse(await sim.execute({ text: '244 在吗', groupId: 'test-group', userId: 'test-user', dryRun: true }))
+  check('群内未 @ + atOnlyInGroup → drop', g1.preview.action === 'drop' && g1.preview.reason === 'group-not-at', JSON.stringify(g1.preview))
+  const g2 = JSON.parse(await sim.execute({ text: '在吗', groupId: 'test-group', userId: 'test-user', atSelf: true, dryRun: true }))
+  check('群内被 @ + atOnlyInGroup → wake', g2.preview.action === 'wake', JSON.stringify(g2.preview))
+  resolvedSettings.atOnlyInGroup = false
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
