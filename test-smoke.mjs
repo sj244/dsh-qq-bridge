@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, labelForSegment, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, labelForSegment, normalizeReplyMode, NS, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -266,8 +266,8 @@ if (sim) {
   check('用法说明：QQ 是聊天不是工作台', p.includes('不是工作台'))
   // 用户报「agent 分不清是在 QQ 还是 DSH 里」→ 规矩必须写成"只对被 QQ 唤醒的那一轮生效"
   check(
-    '用法说明：规矩只对被 QQ 唤醒的那一轮生效（DSH 里别写标记块）',
-    p.includes('只对「被 QQ 唤醒的那一轮」生效') && p.includes('DSH 界面里直接跟你说话') && p.includes('不要写标记块'),
+    '用法说明：规矩只对被 QQ 唤醒的那一轮生效（DSH 里别用出站方式）',
+    p.includes('只对「被 QQ 唤醒的那一轮」生效') && p.includes('DSH 界面里直接跟你说话') && p.includes('不要用任何 QQ 出站方式'),
   )
   // 用户先后三次嫌群里回复太长（"又发出了一坨"、"太长了"、"不适合做封面"）→ 用字数上限钉住
   check('用法说明：群聊回复默认 40 字以内', p.includes('默认 40 字以内') && p.includes('群里只给结论'))
@@ -287,6 +287,64 @@ if (sim) {
   )
   check('用法说明：截断阈值跟着 replyMaxChars 走', p.includes('1200 字'), p.slice(0, 80))
   check('用法说明：明确「回群只用标记块，别拿 send 工具当回复通道」', p.includes('qq_bridge_send') && p.includes('别拿它当回复通道'))
+}
+
+// 出站方式是**开关**（replyMode）：marker / tool / always —— 提示词与出站路径都要跟着变
+// （用户 2026-09-30 定：新增还是替换由用户选，相当于给"标记块发送"装个开关）
+{
+  check(
+    'normalizeReplyMode：只认三个值，其余归 marker',
+    normalizeReplyMode('tool') === 'tool' &&
+      normalizeReplyMode('always') === 'always' &&
+      normalizeReplyMode('marker') === 'marker' &&
+      normalizeReplyMode('乱写') === 'marker' &&
+      normalizeReplyMode(undefined) === 'marker',
+  )
+
+  const pm = buildUsagePrompt({ replyMaxChars: 1500, replyMode: 'marker' })
+  const pt = buildUsagePrompt({ replyMaxChars: 1500, replyMode: 'tool' })
+  const pa = buildUsagePrompt({ replyMaxChars: 1500, replyMode: 'always' })
+  check('marker 提示词：教标记块 + 别拿工具当通道', pm.includes('[QQ]') && pm.includes('别拿它当回复通道'))
+  check('tool 提示词：教调工具、并说明标记块不生效', pt.includes('tool 模式') && pt.includes('标记块在这个模式下不生效'))
+  check('tool 提示词里不再教「只用标记块」', !pt.includes('回群**只用标记块**'))
+  check('always 提示词：警告整轮都会进群', pa.includes('always 模式') && pa.includes('整轮回复都会原样发到群里'))
+
+  const fire = (type, data) => handlers['session/event']({ id: 'session-smoke' }, { type, data })
+  const outbox = async () => JSON.parse(await status.execute({})).recentOutbox
+  const sendTool = registered.find((t) => t.name === 'qq_bridge_send')
+  const base = (await outbox()).length
+
+  // 切到 tool 模式：标记块这条路被关掉
+  resolvedSettings.replyMode = 'tool'
+  fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+  fire('assistant/message', { message: { content: [{ type: 'text', text: '[QQ]tool 模式下标记块应该无效[/QQ]' }] } })
+  fire('turn/end', { reason: { kind: 'completed' } })
+  check('tool 模式：标记块不出站（开关把它关了）', (await outbox()).length === base)
+
+  // 工具在 DSH 轮里被拒绝，并且**明确把原因回给模型**（这就是工具方案要的那个反馈回路）
+  fire('user/message', { source: { kind: 'user' } })
+  const refused = JSON.parse(await sendTool.execute({ text: '不该发出去' }))
+  check(
+    '工具：DSH 轮里被拒绝且说明原因',
+    refused.refused === true && refused.sent === 0 && String(refused.reason).includes('DSH'),
+    JSON.stringify(refused),
+  )
+  check('被拒绝的调用不记 outbox', (await outbox()).length === base)
+
+  // 工具在 QQ 轮里走通，并记 outbox（via: tool）
+  fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+  const sent = JSON.parse(await sendTool.execute({ text: '工具发出去的话' }))
+  const ob = await outbox()
+  check('工具：QQ 轮里不再被拒（发送路径走通）', sent.refused !== true && ob.length === base + 1, JSON.stringify(sent))
+  check(
+    '工具发送记进 outbox（via: tool）',
+    ob[ob.length - 1]?.via === 'tool' && ob[ob.length - 1]?.text === '工具发出去的话',
+    JSON.stringify(ob[ob.length - 1]),
+  )
+
+  // 复位，别影响后面的块
+  resolvedSettings.replyMode = 'marker'
+  fire('turn/end', { reason: { kind: 'completed' } })
 }
 
 // M3：settings Schema 直接生成设置界面上的表单 —— 每个键都必须有说明，否则界面里只剩裸键名

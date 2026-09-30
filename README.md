@@ -144,6 +144,13 @@ QQ 消息 ─┬─ 不在白名单            → 丢弃（fail-closed）
 - 入站消息会自动附一行提示，告诉目标会话该怎么回复。
 - 多个标记块按出现顺序拼接；超长按 `replyMaxChars` 分段。
 - 想恢复"整轮都发"的旧行为：`replyMode: 'always'`。
+- **出站方式是个开关**（`replyMode`）：
+  - `'marker'`（默认）—— 只发标记块里的内容；
+  - `'tool'` —— **关掉标记块这条路**，改用 `qq_bridge_send` 工具发送。
+    代价是每轮多一次模型调用（工具结果回来还要再出一轮），换来的是**有反馈**：
+    不是 QQ 唤醒的那一轮，工具会**被拒绝并说明原因**，模型当场就知道自己在哪；
+    标记块模式下它只会以为"我已经回了"。
+  - `'always'` —— 整轮都发（旧行为，技术内容也会进群）。
 - 调试用的 `qq_bridge_send` 工具**刻意绕过这个闸门**（它就是用来测出站的）。正因如此，
   它每次调用都会记进 outbox（`via: 'tool'`），事后能从 `qq_bridge_status` 查出来 ——
   这样「群里冒出消息了，是闸门漏了还是有人故意发的」永远答得上。
@@ -247,7 +254,7 @@ QQ 的表情、表情包、图片、语音、视频、文件、卡片、合并�
 | `whitelist` / `groupWhitelist` | `[]` | 私聊 / 群白名单（**空 = 谁都不能唤醒**） |
 | `attachRecentChat` / `recentChatLimit` | `true` / `8` | 未唤醒聊天是否附给下次唤醒、条数 |
 | `replyMaxChars` | `1500` | 出站分段上限（下限 100） |
-| `replyMode` | `'marker'` | **出站闸门**：只发 `[QQ]…[/QQ]` 里的内容；`'always'` 才是整轮都发 |
+| `replyMode` | `'marker'` | **出站方式开关**：`'marker'` 标记块（默认）｜`'tool'` 关掉标记块、改用 `qq_bridge_send` 工具｜`'always'` 整轮都发 |
 | `visionModel` | `''` | 给图片写描述的多模态模型（`"provider/model"`）；空 = 自动找 |
 | `onebotUrl` | `''` | NapCat 正向 WS 地址；空 = 不启用传输 |
 | `accessTokenEnv` | `''` | access_token 的凭据引用名 |

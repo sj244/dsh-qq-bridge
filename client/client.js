@@ -73,13 +73,14 @@ window.__ModuleLoader__.load({
       },
       {
         key: 'replyMode',
-        label: '出站闸门',
+        label: '出站方式',
         kind: 'select',
         options: [
-          ['marker', '只发标记块（推荐）'],
-          ['always', '整轮回复都发'],
+          ['marker', '标记块（默认）'],
+          ['tool', '工具调用'],
+          ['always', '整轮都发'],
         ],
-        hint: 'marker = 只把标记块里的内容发到 QQ，防止技术内容刷屏。',
+        hint: '标记块 = 只发块里的内容；工具调用 = 关掉标记块、改用 qq_bridge_send 发送（每轮多一次模型调用，但发不出去时有明确反馈）；整轮都发 = 技术内容也会进群，慎用。',
       },
       { key: 'replyWithQuote', label: '引用原消息', kind: 'boolean', hint: '回复时引用触发的那条消息。' },
       { key: 'stripMarkdown', label: '去掉 Markdown', kind: 'boolean', hint: '出站前去掉 Markdown 标记（QQ 不渲染）。' },

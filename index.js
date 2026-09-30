@@ -79,7 +79,7 @@ export const Config = Schema.object({
   replyWithQuote: Schema.boolean().default(false).description('回复时引用触发那条消息（[CQ:reply]）。'),
   atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
   stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
-  replyMode: Schema.string().default('marker').description("出站模式：'marker'（默认，只发 [QQ]…[/QQ] 里的内容）或 'always'（整轮回复都发，旧行为）。"),
+  replyMode: Schema.string().default('marker').description("出站方式：'marker'（默认，只发 [QQ]…[/QQ] 块里的内容）｜'tool'（不用标记块，改由 qq_bridge_send 工具发送）｜'always'（整轮回复都发，旧行为）。"),
   visionModel: Schema.string().default('').description('用来给图片写描述的多模态模型，"provider/model"；留空 = 自动找第一个支持图片输入的模型。'),
   heartbeatTimeoutMs: Schema.number().default(90000).description('多久没有任何 WS 流量就判定连接已死并重连。'),
   // ── M5：NapCat 自助托管 ───────────────────────────────────────────────────
@@ -120,7 +120,7 @@ const BridgeSettings = Schema.object({
   replyWithQuote: Schema.boolean().default(false).description('回复时引用触发的那条消息。'),
   atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
   stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
-  replyMode: Schema.string().default('marker').description("出站闸门：'marker' = 只发 [QQ]…[/QQ] 块里的内容（默认，防刷屏）；'always' = 整轮回复都发（旧行为，慎用）。"),
+  replyMode: Schema.string().default('marker').description("出站闸门（开关）：'marker' = 标记块发送（默认）｜'tool' = **关掉标记块**，改用 qq_bridge_send 工具发送｜'always' = 整轮都发（旧行为，慎用）。"),
   visionModel: Schema.string().default('').description('给图片写描述的多模态模型，形如 provider/model；留空 = 自动找第一个支持图片输入的模型。'),
   // M5
   napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
@@ -202,7 +202,7 @@ export function apply(ctx, config) {
       replyWithQuote: config.replyWithQuote === true,
       atOnlyInGroup: config.atOnlyInGroup === true,
       stripMarkdown: config.stripMarkdown !== false,
-      replyMode: config.replyMode === 'always' ? 'always' : 'marker',
+      replyMode: normalizeReplyMode(config.replyMode),
       napcatInstallDir: config.napcatInstallDir ?? '',
       napcatVersion: config.napcatVersion ?? '',
       downloadProxy: config.downloadProxy ?? '',
@@ -235,7 +235,7 @@ export function apply(ctx, config) {
       replyWithQuote: s.replyWithQuote === true,
       atOnlyInGroup: s.atOnlyInGroup === true,
       stripMarkdown: s.stripMarkdown !== false,
-      replyMode: s.replyMode === 'always' ? 'always' : 'marker',
+      replyMode: normalizeReplyMode(s.replyMode),
       visionModel: String(s.visionModel ?? config.visionModel ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
       napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
@@ -429,8 +429,9 @@ export function apply(ctx, config) {
     const where = msg.groupName ? `${msg.groupName}` : '私聊'
     // 单条入站也要封顶：有人贴一篇长文过来，不该把上下文整片吃掉。
     const base = `[QQ · ${where}] ${who}：${truncateText(msg.text, MAX_INBOUND_CHARS)}`
-    // 只有 marker 模式才提示；always 模式没有要守的规矩。
+    // 每一轮都只在该轮的入站上写"怎么回"——这是**逐轮**的信号，不靠常驻提示。
     if (s?.replyMode === 'always') return base
+    if (s?.replyMode === 'tool') return `${base}\n（回 QQ：用 qq_bridge_send 工具）`
     return `${base}\n（回 QQ 用 [QQ]…[/QQ]）`
   }
 
@@ -1103,9 +1104,15 @@ export function apply(ctx, config) {
         return
       }
 
-      // 第二道：默认（replyMode='marker'）**只发 [QQ]…[/QQ] 里的内容**：整轮的技术说明、
-      // 思考过程、给 DSH 看的报告都不该倒进群里。没有标记块就一个字都不发。
+      // 第二道 = 出站**开关**：replyMode='tool' 时这一整条路关掉，改由 qq_bridge_send 工具发。
       const s = readSettings()
+      if (s.replyMode === 'tool') {
+        logger.info('replyMode=tool：标记块不参与出站（这一轮要发就调 qq_bridge_send 工具）')
+        return
+      }
+
+      // 默认（replyMode='marker'）**只发 [QQ]…[/QQ] 里的内容**：整轮的技术说明、
+      // 思考过程、给 DSH 看的报告都不该倒进群里。没有标记块就一个字都不发。
       const text = s.replyMode === 'always' ? raw : extractQQReply(raw)
       if (!text) {
         logger.info('本轮没有 [QQ] 块，未发往 QQ')
@@ -1210,38 +1217,8 @@ export function apply(ctx, config) {
       },
     }))
 
-    ctx.tools.register(defineTool({
-      name: 'qq_bridge_send',
-      description:
-        '立刻通过 OneBot 发一条消息。**这会刻意绕过出站闸门**（不需要标记块），' +
-        '所以只用于测试连通性、或你明确要求"直接发这一条"；**正常回复群里请走标记块**。' +
-        '每次调用都会记进 outbox（via: tool），事后可以从 qq_bridge_status 查到。',
-      parameters: {
-        text: { type: 'string', required: true, description: '要发送的文本。' },
-        userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用最后一次入站目的地。' },
-        groupId: { type: 'string', description: '群号；与 userId 二选一。' },
-      },
-      output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-      async execute(args) {
-        const dest = args.groupId
-          ? { kind: 'group', groupId: String(args.groupId) }
-          : args.userId
-            ? { kind: 'private', userId: String(args.userId) }
-            : undefined
-        try {
-          const result = await sendToQQ(args.text, dest)
-          recordOutbox({
-            sessionId: 'tool:qq_bridge_send',
-            via: 'tool',
-            to: result?.destination ?? dest ?? state.lastDestination,
-            text: args.text,
-          })
-          return JSON.stringify(result, null, 2)
-        } catch (error) {
-          return JSON.stringify({ error: error?.message ?? String(error) }, null, 2)
-        }
-      },
-    }))
+    // qq_bridge_send 是**正式出站通道**（replyMode='tool' 时唯一的那条），
+    // 所以不放在 debugTools 里 —— 见下面那段注册。
 
     ctx.tools.register(defineTool({
       name: 'qq_bridge_transport',
@@ -1294,6 +1271,55 @@ export function apply(ctx, config) {
       },
     }))
   }
+
+  // ── 出站工具：replyMode='tool' 时的**正式通道** ──────────────────────────────
+  //
+  // 不受 debugTools 限制 —— 选了 'tool' 模式，它就是回复群里的唯一方式，不是调试工具。
+  // 两道保险：
+  //   ① **来源闸门**：只有「被 QQ 唤醒的那一轮」才发得出去。在 DSH 界面里直接对话时调用会被
+  //      拒绝，并把原因回给模型 —— 这正是标记块模式缺的那个反馈回路（用户报的"分不清在哪"）；
+  //   ② 每次调用（含被拒绝的**不**记）都落 outbox（via: 'tool'），事后能从 status 查到。
+  ctx.tools.register(defineTool({
+    name: 'qq_bridge_send',
+    description:
+      '把一条消息发到 QQ（默认发给最后一次入站的目的地）。' +
+      '**只有被 QQ 唤醒的那一轮才发得出去**：在 DSH 界面里直接对话时调用会被拒绝并说明原因。' +
+      'replyMode=tool 时这是唯一的出站方式；marker 模式下它是「直接发这一条」的旁路。' +
+      '发出去的内容会记进 outbox（via: tool）。',
+    parameters: {
+      text: { type: 'string', required: true, description: '要发送的文本。' },
+      userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用最后一次入站目的地。' },
+      groupId: { type: 'string', description: '群号；与 userId 二选一。' },
+    },
+    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
+    async execute(args) {
+      // 来源闸门：不是 QQ 唤醒的那一轮，一个字都不发，并且**明确告诉模型原因**。
+      if (!turnFromQQ) {
+        return JSON.stringify({
+          sent: 0,
+          refused: true,
+          reason: '本轮不是 QQ 唤醒的（这条消息来自 DSH 界面），所以没有发到 QQ。用普通回复即可，不需要这个工具。',
+        }, null, 2)
+      }
+      const dest = args.groupId
+        ? { kind: 'group', groupId: String(args.groupId) }
+        : args.userId
+          ? { kind: 'private', userId: String(args.userId) }
+          : undefined
+      try {
+        const result = await sendToQQ(args.text, dest)
+        recordOutbox({
+          sessionId: 'tool:qq_bridge_send',
+          via: 'tool',
+          to: result?.destination ?? dest ?? state.lastDestination,
+          text: args.text,
+        })
+        return JSON.stringify(result, null, 2)
+      } catch (error) {
+        return JSON.stringify({ error: error?.message ?? String(error) }, null, 2)
+      }
+    },
+  }))
 
   // ── M5：NapCat 自助托管（下载 / 配置 / 启停）───────────────────────────────
   //
@@ -1531,6 +1557,11 @@ export function apply(ctx, config) {
   logger.info(`ready (target=${readSettings().targetSessionId || '未设置'}, onebot=${readSettings().onebotUrl || '未配置'}, state=${statePath})`)
 }
 
+/** 出站方式的归一化：只认 'marker' | 'tool' | 'always'，别的一律当 'marker'。导出是为了可测试。 */
+export function normalizeReplyMode(raw) {
+  return raw === 'always' || raw === 'tool' ? raw : 'marker'
+}
+
 function clamp01(n) {
   if (!Number.isFinite(n)) return 0.05
   return Math.max(0, Math.min(1, n))
@@ -1544,12 +1575,13 @@ function clamp01(n) {
  */
 export function buildUsagePrompt(s = {}) {
   const maxChars = Number.isFinite(s?.replyMaxChars) && s.replyMaxChars > 0 ? s.replyMaxChars : 1500
+  const mode = normalizeReplyMode(s?.replyMode)
   return [
     '你正通过 dsh-qq-bridge 连着 QQ（可能是群聊，也可能是私聊）。',
     '',
     '**下面这些规矩只对「被 QQ 唤醒的那一轮」生效** —— 判据是那一轮的用户消息带 `[QQ · …]` 前缀。',
     '会话发起人也可能在 **DSH 界面里直接跟你说话**：那种消息**不带**前缀，按平常方式回答就行，',
-    '**不要写标记块**（写了也不会发出去，只会让 DSH 这边的对话变得莫名其妙）。',
+    '**不要用任何 QQ 出站方式**（发了也不会出去，只会让 DSH 这边的对话变得莫名其妙）。',
     '',
     '【你会看到什么】',
     '- 入站消息形如「[QQ · 群名] 昵称：内容」；私聊时地点写成「私聊」。',
@@ -1557,11 +1589,27 @@ export function buildUsagePrompt(s = {}) {
     '- 图片由多模态模型先转成文字，以「[图片N] <描述>」的形式给你 —— 描述可能不准，别当成绝对事实。',
     '',
     '【怎么把话说回 QQ】',
-    '- 只有放在 [QQ] 与 [/QQ] 之间的内容才会发出去（开标记必须**独占行首**）；一轮可以写多个块。',
-    '- 没有块就一个字都不会发。给自己看的分析、命令、路径、结论，全部写在块外面。',
-    '- 回群**只用标记块**。`qq_bridge_send` 是刻意绕过闸门的工具（测连通性、或明确要求直接发），',
-    '  别拿它当回复通道 —— 它发出去的东西同样会进群，而且会被记进 outbox 台账。',
-    '- 块里的字 = 群里每个人都会看到的话。QQ 是聊天，不是工作台。',
+    // 出站方式是**开关**（replyMode），提示词必须跟着变 —— 否则会教模型一个在本部署里
+    // 根本不生效的做法（用户 2026-09-30 要求「新增还是替换由用户选」）。
+    ...(mode === 'tool'
+      ? [
+          '当前是 **tool 模式**：回群要调 `qq_bridge_send` 工具，把要说的话当参数发出去。',
+          '**标记块在这个模式下不生效**（写了也不会发出去），不要用。',
+          '不调工具就一个字都不会发。给自己看的分析、命令、路径、结论写在正文里就行（正文不出口）。',
+          '⚠️ **不是 QQ 唤醒的那一轮，这个工具会被拒绝**并告诉你原因 —— 那种时候正常回答即可。',
+        ]
+      : mode === 'always'
+        ? [
+            '当前是 **always 模式**：**整轮回复都会原样发到群里**（包括技术细节、路径、过程汇报）。',
+            '所以要么只写本该给群里看的话，要么把这一轮当成"公开场合"来写。',
+          ]
+        : [
+            '只有放在 [QQ] 与 [/QQ] 之间的内容才会发出去（开标记必须**独占行首**）；一轮可以写多个块。',
+            '没有块就一个字都不会发。给自己看的分析、命令、路径、结论，全部写在块外面。',
+            '回群**只用标记块**。`qq_bridge_send` 是旁路工具（测连通性、或明确要求直接发），',
+            '  别拿它当回复通道 —— 它发出去的东西同样会进群，而且会被记进 outbox 台账。',
+          ]),
+    '- 发到群里的字 = 群里每个人都会看到的话。QQ 是聊天，不是工作台。',
     '',
     '【群聊礼仪】',
     '- 只写一两句正常人会在群里说的话，**默认 40 字以内**（一到两行）；别刷屏，别写小作文。',
