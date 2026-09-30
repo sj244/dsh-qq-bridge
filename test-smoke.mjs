@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, labelForSegment, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, inlineImageNotes, labelForSegment, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -728,6 +728,25 @@ if (sim) {
   // 官方规范点名过这个坑：路径写错只会在市场里静默 404，本地测不出来
   const gone = (arr || []).filter((s) => !existsSync(fileURLToPath(new URL(`./${s}`, import.meta.url))))
   check('每个截图文件都真实存在（改名/删除就 FAIL）', gone.length === 0, gone.join(', '))
+}
+
+// 图片描述必须**就地**填回 [图片] 占位符（2026-10-01 用户真机反馈：以前描述另起一段
+// 附在末尾，模型会读成"这张图没解析出来、后面又来了一张"）
+{
+  const i1 = { url: 'a' }
+  const i2 = { url: 'b' }
+  const d = new Map([
+    [i1, '一只猫'],
+    [i2, '一张卡牌：攻击力 3'],
+  ])
+  check('描述就地替换占位符', inlineImageNotes('看看 [图片] 这个', [i1], d) === '看看 [图片]：一只猫 这个')
+  check('多图按顺序对上各自的描述', inlineImageNotes('[图片] 和 [图片]', [i1, i2], d) === '[图片]：一只猫 和 [图片]：一张卡牌：攻击力 3')
+  check('没拿到描述 → 标未描述', inlineImageNotes('[图片]', [i1], new Map()) === '[图片]（未描述）')
+  check('纯图无文字', inlineImageNotes('[图片]', [i1], d) === '[图片]：一只猫')
+  check('多出来的占位符留原样（对不上就不编）', inlineImageNotes('[图片][图片]', [i1], d) === '[图片]：一只猫[图片]')
+  check('没有占位符就不动正文', inlineImageNotes('只有文字', [i1], d) === '只有文字')
+  check('关键：不会再多出一段 [图片] 开头的描述行', !/\n\s*\[图片/.test(inlineImageNotes('[图片] 文字', [i1], d)))
+  check('digest 与入站各自对齐（不会串号）', inlineImageNotes('缓冲 [图片]', [i1], d) + inlineImageNotes('本条 [图片]', [i2], d) === '缓冲 [图片]：一只猫本条 [图片]：一张卡牌：攻击力 3')
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)

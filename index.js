@@ -165,6 +165,26 @@ export function labelForSegment(type, data) {
   return typeof label === 'function' ? label(data) : label
 }
 
+/**
+ * 把正文里的 `[图片]` 占位符**就地**换成 `[图片]：描述`。导出是为了可测试。
+ *
+ * 为什么不再把描述另起一段附在消息末尾：那样模型看到的是
+ * 「…[图片] 文字」+ 末尾一段「[图片]：描述」，会读成"前面这张图没解析出来、
+ * 后面又来了一张" —— 位置本身就是信息。（2026-10-01 用户真机反馈。）
+ * 按 images 顺序逐个对上占位符；多出来的占位符留原样，没有描述的标「（未描述）」。
+ */
+export function inlineImageNotes(text, images, descById) {
+  const list = Array.isArray(images) ? images : []
+  const notes = descById instanceof Map ? descById : new Map()
+  let i = 0
+  return String(text ?? '').replace(/\[图片\]/g, (m) => {
+    if (i >= list.length) return m
+    const note = notes.get(list[i])
+    i += 1
+    return note === undefined ? '[图片]（未描述）' : `[图片]：${note}`
+  })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function apply(ctx, config) {
@@ -579,7 +599,7 @@ export function apply(ctx, config) {
     const head =
       `[QQ 未唤醒期间聊天记录 · 最近 ${lines.length} 条` +
       `${omitted > 0 ? `（更早的 ${omitted} 条已省略）` : ''}` +
-      `${images.length > 0 ? `（含 ${images.length} 张图片，按时间顺序附在消息后面）` : ''}]`
+      `${images.length > 0 ? `（含 ${images.length} 张图片，原位会跟一段描述）` : ''}]`
     return { text: `${head}\n${lines.join('\n')}\n[记录结束]\n\n`, images }
   }
 
@@ -868,24 +888,24 @@ export function apply(ctx, config) {
 
     const agent = await ensureTargetAgent()
     const digest = renderDigest(s, bufferSnapshot)
-    let text = `${digest.text}${renderInbound(msg, s)}`
     // 图片：缓冲里攒下的 + 本条消息的，一起下载成真正的附件。
+
     // 失败就只留 [图片] 占位符，但把**失败原因**附在正文里 —— 否则"看不见图"对模型完全不可观测。
     const allImages = [...digest.images, ...cachedImages]
     const { blocks: imageBlocks, failures } = await loadImageBlocks(allImages)
-    if (failures.length > 0) text += `\n（有 ${failures.length} 张图片没能取到，原因：${failures[0]}）`
-
     // 目标模型多半看不了图（deepseek-v4-flash 就是纯文本，附件会被系统剥成 "image omitted"）
-    // —— 所以先用多模态模型把图读成一句描述，附在正文里。这才是它能"知道图里是什么"的唯一途径。
-    const toDescribe = allImages.slice(0, MAX_DESCRIBE_PER_WAKE)
-    if (toDescribe.length > 0) {
-      const notes = []
-      for (let i = 0; i < toDescribe.length; i++) {
-        const r = await describeImage(toDescribe[i])
-        notes.push(r.ok ? `[图片${i + 1}] ${r.text}` : `[图片${i + 1}] （描述失败：${r.reason}）`)
-      }
-      text += `\n${notes.join('\n')}`
+    // —— 所以先用多模态模型把图读成一句描述，然后**就地填回 [图片] 占位符**。
+    // （描述另起一段附在末尾是错的：模型会读成"这张图没解析出来、后面又来了一张"。）
+    const descById = new Map()
+    for (const img of allImages.slice(0, MAX_DESCRIBE_PER_WAKE)) {
+      const r = await describeImage(img)
+      descById.set(img, r.ok ? r.text : `（描述失败：${r.reason}）`)
     }
+
+    let text =
+      inlineImageNotes(digest.text, digest.images, descById) +
+      inlineImageNotes(renderInbound(msg, s), cachedImages, descById)
+    if (failures.length > 0) text += `\n（有 ${failures.length} 张图片没能取到，原因：${failures[0]}）`
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
     const injected = makeMessage(text, imageBlocks)
@@ -1840,7 +1860,7 @@ export function buildUsagePrompt(s = {}) {
     '【你会看到什么】',
     '- 入站消息形如「[QQ · 群名] 昵称：内容」；私聊时地点写成「私聊」。',
     '- 你没被唤醒期间的聊天会攒成一段「[QQ 未唤醒期间聊天记录] … [记录结束]」摘要，附在消息前面。',
-    '- 图片由多模态模型先转成文字，以「[图片N] <描述>」的形式给你 —— 描述可能不准，别当成绝对事实。',
+    '- 图片由多模态模型先转成文字，**就地**贴在图片原来的位置上，形如「[图片]：<描述>」—— 描述可能不准，别当成绝对事实。',
     '',
     '【怎么把话说回 QQ】',
     // 出站方式是**开关**（replyMode），提示词必须跟着变 —— 否则会教模型一个在本部署里
