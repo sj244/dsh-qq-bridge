@@ -114,11 +114,18 @@ if (sim) {
 {
   check('无标记 → 一个字都不发', extractQQReply('这些技术说明不该进群') === '')
   check('单块 → 只取块内', extractQQReply('前言\n[QQ]在的 👻[/QQ]\n后记') === '在的 👻')
-  check('多块 → 按顺序拼接', extractQQReply('[QQ]第一句[/QQ] 中间 [QQ]第二句[/QQ]') === '第一句\n\n第二句')
+  check('多块 → 按顺序拼接', extractQQReply('[QQ]第一句[/QQ]\n中间\n[QQ]第二句[/QQ]') === '第一句\n\n第二句')
   check('空块 → 忽略', extractQQReply('[QQ]   [/QQ]') === '')
   check('大小写 / 跨行都认', extractQQReply('[qq]\n跨行内容\n[/QQ]') === '跨行内容')
   check('未闭合 → 不发', extractQQReply('[QQ]没有结尾') === '')
   check('空输入安全', extractQQReply(undefined) === '')
+  // 关键回归：正文里"提到标记本身"不能把中间正文串进来（真机踩过，一大段正文被发进群）
+  const prose = '要给 QQ 看的话放进 [QQ] 里。\n[QQ]你好[/QQ]\n后面是给自己看的技术细节'
+  check('正文提及标记不会串味', extractQQReply(prose) === '你好', JSON.stringify(extractQQReply(prose)))
+  const two = '技术说明一\n[QQ]第一句[/QQ]\n技术说明二\n[QQ]第二句[/QQ]\n尾注'
+  check('两块各自独立抽取', extractQQReply(two) === '第一句\n\n第二句', JSON.stringify(extractQQReply(two)))
+  const inline = '前置文字 [QQ]行内的块[/QQ] 后置文字'
+  check('行内的块不再被当作块（宁可漏发也不串味）', extractQQReply(inline) === '', JSON.stringify(extractQQReply(inline)))
 }
 
 // 上下文上限：别让群里的长文把上下文撑爆
