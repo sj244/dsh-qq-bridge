@@ -46,6 +46,8 @@
     "onebot.js",
     "napcat.js",
     "client",
+    "assets",
+    "screenshots.json",
     "cordis.patch.yml",
     "README.md",
     "DESIGN.md",

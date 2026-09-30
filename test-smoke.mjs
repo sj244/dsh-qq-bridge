@@ -347,6 +347,23 @@ if (sim) {
   check('qq_bridge_status 报告浏览器半状态', st.clientHalf && typeof st.clientHalf === 'object', JSON.stringify(st.clientHalf))
 }
 
+// 商城详情页截图：仓库根目录的 screenshots.json（路径相对于它自己，1–8 张）
+{
+  const shotPath = fileURLToPath(new URL('./screenshots.json', import.meta.url))
+  check('screenshots.json 存在', existsSync(shotPath))
+  const raw = existsSync(shotPath) ? JSON.parse(readFileSync(shotPath, 'utf8')) : []
+  const arr = Array.isArray(raw) ? raw : raw?.screenshots
+  check('截图数量在 1–8 之间', Array.isArray(arr) && arr.length >= 1 && arr.length <= 8, String(arr?.length))
+  check(
+    '截图是相对路径、不跳出仓库目录',
+    (arr || []).every((s) => typeof s === 'string' && !s.startsWith('/') && !s.includes('..')),
+    JSON.stringify(arr),
+  )
+  // 官方规范点名过这个坑：路径写错只会在市场里静默 404，本地测不出来
+  const gone = (arr || []).filter((s) => !existsSync(fileURLToPath(new URL(`./${s}`, import.meta.url))))
+  check('每个截图文件都真实存在（改名/删除就 FAIL）', gone.length === 0, gone.join(', '))
+}
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 if (warnings.length) console.log('warnings:', warnings.slice(0, 5))
 process.exit(failed === 0 ? 0 : 1)
