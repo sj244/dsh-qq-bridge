@@ -502,6 +502,27 @@ check(
   check('摘要正文不超过 1200 字', !m || m[1].length <= 1200, m ? `${m[1].length} 字` : 'n/a')
 }
 
+// 9.7) **只 @ 一下、不带文字**：必须唤醒，不能被"文本为空"静默丢弃（真机踩过）
+{
+  const beforeN = state.followups.length
+  mock.sendEvent({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: 2001,
+    user_id: 1001,
+    self_id: 10001,
+    message_id: 888,
+    raw_message: '[CQ:at,qq=10001] ',
+    message: [
+      { type: 'at', data: { qq: '10001' } },
+      { type: 'text', data: { text: ' ' } },
+    ],
+    sender: { nickname: '小明', card: '群名片小明' },
+  })
+  await waitFor(() => state.followups.length > beforeN)
+  check('只 @ 一下（无文字）也会唤醒', state.followups.length > beforeN, `followups ${beforeN} -> ${state.followups.length}`)
+}
+
 // 10) 卸载：传输必须干净停掉
 for (const d of state.disposers) await d()
 check('dispose 后连接已关闭', await waitFor(() => mock.connected === false, 2000))

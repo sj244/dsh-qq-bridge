@@ -830,7 +830,13 @@ export function apply(ctx, config) {
     if (selfId !== '' && userId === selfId) return
 
     const inbound = mapOneBotMessage(event, selfId)
-    if (!inbound || inbound.text.trim() === '') return
+    if (!inbound) return
+    // ⚠️ **绝不能因为"文本为空"就丢掉整条消息。**
+    // 只 @ 一下（不带文字）是最自然的"叫你一声"，纯表情包/纯图片同理 ——
+    // 它们都必须进 decide()。只有**什么都没带**（无文字、没 @ 我、没图片）才忽略。
+    // 真机上踩过：用户发「@244」时 text 是空串/空格，结果被静默丢弃、@ 了也不唤醒。
+    const hasImages = Array.isArray(inbound.images) && inbound.images.length > 0
+    if (inbound.text.trim() === '' && inbound.atSelf !== true && !hasImages) return
 
     if (inbound.groupId) {
       // 群名只用于渲染：优先用缓存，拿不到就留空（fail-open，不影响策略）。
