@@ -827,6 +827,36 @@ window.__ModuleLoader__.load({
 **提交方式**：把 `docs/awesome-dsh-plugin-entry.yml` 复制成 `data/plugins/sj244__dsh-qq-bridge.yml`，
 推到 fork 的分支后开 PR。一个 PR 最多 3 条（我们 1 条），README 由脚本生成、别手改。
 
+## 17. 出站闸门按**来源**生效（2026-09-30 用户报「agent 分不清是在 QQ 还是 DSH 里」）
+
+**问题**：用法说明是**常驻**系统提示 —— 会话发起人在 DSH 界面里跟同一个会话聊天时，
+模型同样看得到「你连着 QQ、回话用标记块」。而原来的出站只看「有没有标记块」，
+于是 **DSH 那一轮里出现的标记块也会被发进群**：闸门开在了错误的维度上。
+
+**修法**：一个 `turnFromQQ` 标记 + 两道闸门。
+
+| 时机 | 动作 |
+|---|---|
+| `handleInbound` 注入时 | **直接置位**（注入方最清楚这一轮是谁叫的，不依赖观察到自己的事件） |
+| `user/message`，`source.kind==='plugin'` 且 `plugin===PLUGIN_TAG` | 置位 |
+| `user/message`，`source.kind==='user'`（人在 DSH 里打字）或**别的插件**注入 | **清除** |
+| `user/message`，`source.kind` 是 `tool` / `model` | **不动标记** —— 工具结果也是 `user/message`，让它冲掉的话「多步工具调用」的轮次会漏发 |
+| `turn/end` | 读一次即归零；不是 QQ 轮 → 记一条日志、**一个字都不发**（fail-closed 默认） |
+
+**消息来源的形状**（rc.3 类型里核实过）：`MessageSourceMap` =
+`{kind:'user'}` / `{kind:'plugin', plugin}` / `{kind:'model'}` / `{kind:'tool'}`；
+`user/message` 事件的 `data` 就是带 `.source` 的 `UserMessage`。
+
+**测试**：`test-smoke.mjs` 现在会捕获 `ctx.on` 的处理器并直接喂 `session/event`，
+覆盖五种来源（DSH 用户 / 本插件 / 工具结果 / 别的插件 / 无来源），方向全是 fail-closed。
+`test-onebot.mjs` 原来的出站场景编码的是**旧契约**（"有标记就发"），已补上"这一轮来自 QQ"的
+前置事件 —— 它当初照样绿，恰好说明这条闸门以前根本不存在。
+
+> 待决策（用户 2026-09-30 提出）：把出站从标记块改成**工具调用**（`replyMode: 'tool'`）。
+> 好处：结构上不可能串味、**有反馈回路**（不是 QQ 轮时工具直接拒绝并说明原因，模型当场知道自己在哪）、
+> 不说话就不用调工具。代价：每轮多一次模型调用（工具结果回来还要再出一轮），
+> 而且**调用即发**、可能出现"我先看看…"这种半截话先出群。来源闸门无论选哪条路都必须有。
+
 ### `onebot.js`（M2 传输层）
 
 | 位置（函数） | 作用 |

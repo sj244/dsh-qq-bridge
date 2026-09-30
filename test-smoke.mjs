@@ -18,6 +18,8 @@ const warnings = []
 // 这里必须如实模拟，否则 config 里的白名单/昵称会被丢掉。
 let resolvedSettings = {}
 const registeredSettings = []
+// 捕获 ctx.on 注册的处理器：出站闸门要看「这一轮是不是 QQ 唤醒的」，只有真的喂事件才测得到
+const handlers = {}
 const ctx = {
   logger: { info() {}, warn: (m) => warnings.push(String(m)) },
   settings: {
@@ -26,7 +28,10 @@ const ctx = {
   },
   agents: { get: () => undefined, roots: () => [], resume: async () => { throw new Error('smoke: no agent factory') } },
   tools: { register: (def) => registered.push(def) },
-  on: () => {},
+  on: (name, fn) => {
+    handlers[name] = fn
+    return () => {}
+  },
   effect: () => {},
   get: () => undefined,
 }
@@ -207,11 +212,63 @@ if (sim) {
   check('status 暴露 listening 字段', 'listening' in st)
 }
 
+// 出站闸门必须看**来源**：只有「QQ 唤醒的那一轮」才允许出站。
+// 用户 2026-09-30 报的：「agent 分不清是在 QQ 还是 DSH 里」—— 用法说明是常驻系统提示，
+// DSH 界面里的那一轮模型同样看得到标记块规矩，所以闸门不能只看"有没有标记块"。
+{
+  const fire = (type, data, extra = {}) => handlers['session/event']({ id: 'session-smoke' }, { type, data, ...extra })
+  const outbox = async () => JSON.parse(await status.execute({})).recentOutbox
+  const dump = (m, a) => JSON.stringify({ m, last: a.slice(-1)[0]?.text ?? null, n: a.length })
+  const before = (await outbox()).length
+  const reply = (text) => fire('assistant/message', { message: { content: [{ type: 'text', text }] } })
+  const end = () => fire('turn/end', { reason: { kind: 'completed' } })
+
+  // A) 人在 DSH 界面里打字触发的那一轮：即使写了标记块也不出站
+  fire('user/message', { source: { kind: 'user' } })
+  reply('[QQ]DSH 里聊出来的标记块不该进群[/QQ]')
+  end()
+  const a = await outbox()
+  check('DSH 触发的轮次：标记块不出站', a.length === before, dump('A', a))
+
+  // B) QQ 注入的那一轮：正常出站
+  fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+  reply('这段只给 DSH 看\n[QQ]群里看到这句[/QQ]')
+  end()
+  const b = await outbox()
+  check('QQ 触发的轮次：正常出站且只取块内', b.length === before + 1 && b[b.length - 1].text === '群里看到这句', dump('B', b))
+
+  // C) 工具结果也是 user/message，不能把「这轮来自 QQ」冲掉
+  fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+  fire('user/message', { source: { kind: 'tool' } })
+  reply('[QQ]工具跑完后的回复[/QQ]')
+  end()
+  const c = await outbox()
+  check('工具结果不会冲掉「来自 QQ」的标记', c.length === before + 2 && c[c.length - 1].text === '工具跑完后的回复', dump('C', c))
+
+  // D) 别的插件（cron / goal / 别人）注入的轮次同样不出站
+  fire('user/message', { source: { kind: 'plugin', plugin: 'dsh-cron' } })
+  reply('[QQ]cron 那一轮[/QQ]')
+  end()
+  const d = await outbox()
+  check('别的插件触发的轮次也不出站', d.length === before + 2, dump('D', d))
+
+  // E) 没有 user/message 直接 turn/end（冷启动等）→ fail-closed
+  reply('[QQ]没有来源信息[/QQ]')
+  end()
+  const e = await outbox()
+  check('没有来源信息时 fail-closed', e.length === before + 2, dump('E', e))
+}
+
 // 注入的用法说明是一份**产品契约**：出站标记 / 群聊礼仪 / 无人值守特权禁令 / 监听模式用法
 {
   const p = buildUsagePrompt({ replyMaxChars: 1200 })
   check('用法说明：出站标记 + 开标记独占行首', p.includes('[QQ]') && p.includes('独占行首'))
   check('用法说明：QQ 是聊天不是工作台', p.includes('不是工作台'))
+  // 用户报「agent 分不清是在 QQ 还是 DSH 里」→ 规矩必须写成"只对被 QQ 唤醒的那一轮生效"
+  check(
+    '用法说明：规矩只对被 QQ 唤醒的那一轮生效（DSH 里别写标记块）',
+    p.includes('只对「被 QQ 唤醒的那一轮」生效') && p.includes('DSH 界面里直接跟你说话') && p.includes('不要写标记块'),
+  )
   // 用户先后三次嫌群里回复太长（"又发出了一坨"、"太长了"、"不适合做封面"）→ 用字数上限钉住
   check('用法说明：群聊回复默认 40 字以内', p.includes('默认 40 字以内') && p.includes('群里只给结论'))
   check('用法说明：无人值守不碰特权操作', p.includes('无人值守') && p.includes('不要主动做'))

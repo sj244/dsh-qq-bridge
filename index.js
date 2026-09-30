@@ -769,6 +769,9 @@ export function apply(ctx, config) {
     } catch {
       send()
     }
+    // 这一轮是 QQ 唤醒的 —— 出站闸门要用（见下面的 turnFromQQ）。
+    // 不依赖"观察到自己的 user/message 事件"：注入方自己最清楚。
+    turnFromQQ = true
     // 只移除**确实进了这次摘要**的那些条目（按对象身份），
     // 期间新到的消息要留在缓冲里等下一次唤醒。
     state.buffer = state.buffer.filter((m) => !bufferSnapshot.includes(m))
@@ -1045,10 +1048,36 @@ export function apply(ctx, config) {
 
   let pendingReply = null
 
+  /**
+   * 这一轮到底是不是「QQ 唤醒的那一轮」。
+   *
+   * **为什么必须有它**：注入的用法说明是**常驻**的系统提示 —— 会话发起人在 DSH 界面里
+   * 跟同一个会话聊天时，模型同样看得到「你连着 QQ，回话用标记块」。如果出站不看来源，
+   * DSH 那一轮里出现的标记块也会被发进群，等于把闸门开在了错误的维度上
+   * （用户 2026-09-30 报的正是这个：「agent 分不清是在 QQ 还是 DSH 里」）。
+   *
+   * 判据是**最近一条 user/message 的来源**：
+   *   - `kind === 'user'`                        → 人在 DSH 里打字，不是 QQ 轮
+   *   - `kind === 'plugin'` 且 plugin 是我们自己  → QQ 唤醒的那一轮
+   *   - 其他 plugin（cron / goal / 别人）        → 也不是 QQ 轮（严格一点，宁可漏发）
+   *   - `tool` / `model` / 未知                  → **不动标记**（工具结果也是 user/message，
+   *     不能让它在同一轮中间把标记冲掉）
+   * 默认 false = 没有 QQ 唤醒就不出站（fail-closed）。
+   */
+  let turnFromQQ = false
+
   ctx.on('session/event', guarded('session/event', (session, event) => {
     const targetId = readSettings().targetSessionId
     if (!targetId || session?.id !== targetId) return
     const data = event?.data ?? {}
+
+    if (event.type === 'user/message') {
+      const source = data.source ?? data.message?.source ?? {}
+      const kind = typeof source.kind === 'string' ? source.kind : 'unknown'
+      if (kind === 'user') turnFromQQ = false
+      else if (kind === 'plugin') turnFromQQ = source.plugin === PLUGIN_TAG
+      return
+    }
 
     if (event.type === 'assistant/message') {
       // ⚠️ surfaceOp 是事件对象的**顶层**字段（与 type/seq/time/data 同级），不在 data 里。
@@ -1064,9 +1093,17 @@ export function apply(ctx, config) {
       const kind = typeof data.reason?.kind === 'string' ? data.reason.kind : 'unknown'
       const raw = pendingReply
       pendingReply = null
+      const fromQQ = turnFromQQ
+      turnFromQQ = false // 一轮结束就归零；下一轮由它自己的 user/message 重新决定
       if (!raw) return
 
-      // 默认（replyMode='marker'）**只发 [QQ]…[/QQ] 里的内容**：整轮的技术说明、
+      // 闸门的第一道：**只发 QQ 唤醒的那一轮**。DSH 界面里聊出来的标记块一个字都不发。
+      if (!fromQQ) {
+        logger.info('本轮不是 QQ 唤醒的（最近一条用户消息不是 QQ 注入），即使有标记块也不出站')
+        return
+      }
+
+      // 第二道：默认（replyMode='marker'）**只发 [QQ]…[/QQ] 里的内容**：整轮的技术说明、
       // 思考过程、给 DSH 看的报告都不该倒进群里。没有标记块就一个字都不发。
       const s = readSettings()
       const text = s.replyMode === 'always' ? raw : extractQQReply(raw)
@@ -1509,6 +1546,10 @@ export function buildUsagePrompt(s = {}) {
   const maxChars = Number.isFinite(s?.replyMaxChars) && s.replyMaxChars > 0 ? s.replyMaxChars : 1500
   return [
     '你正通过 dsh-qq-bridge 连着 QQ（可能是群聊，也可能是私聊）。',
+    '',
+    '**下面这些规矩只对「被 QQ 唤醒的那一轮」生效** —— 判据是那一轮的用户消息带 `[QQ · …]` 前缀。',
+    '会话发起人也可能在 **DSH 界面里直接跟你说话**：那种消息**不带**前缀，按平常方式回答就行，',
+    '**不要写标记块**（写了也不会发出去，只会让 DSH 这边的对话变得莫名其妙）。',
     '',
     '【你会看到什么】',
     '- 入站消息形如「[QQ · 群名] 昵称：内容」；私聊时地点写成「私聊」。',

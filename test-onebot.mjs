@@ -382,8 +382,18 @@ check('记录不改动唤醒次数', state.followups.length === 2)
 const onSessionEvent = state.listeners.get('session/event')
 check('session/event 监听已注册', typeof onSessionEvent === 'function')
 
+// 出站闸门现在看**来源**：只有「QQ 唤醒的那一轮」才允许出站（index.js 的 turnFromQQ）。
+// 真实链路里这个标记由 handleInbound 注入时置位；这里手工补一条我们自己的 user/message，
+// 否则 fire 出来的 assistant/message 会被正确地判成"不是 QQ 轮"而不发。
+const asQQTurn = () =>
+  onSessionEvent(
+    { id: 'session-target' },
+    { type: 'user/message', seq: 0, time: Date.now(), data: { source: { kind: 'plugin', plugin: 'qq-bridge' } } },
+  )
+
 mock.actions.length = 0
-// 7a) 没有 [QQ] 标记 → 一个字都不该发出去
+// 7a) 没有 [QQ] 标记 → 一个字都不该发出去（这一轮确实是 QQ 唤醒的，所以测的是标记规则本身）
+asQQTurn()
 onSessionEvent(
   { id: 'session-target' },
   {
@@ -401,6 +411,7 @@ await sleep(400)
 check('无 [QQ] 标记 → 不发送', mock.actions.filter((a) => a.action === 'send_private_msg').length === 0)
 
 // 7b) 有标记 → 只发块内内容，块外的文字不发
+asQQTurn()
 onSessionEvent(
   { id: 'session-target' },
   {
@@ -432,6 +443,7 @@ check('Markdown 标记已去除', !outText.includes('**') && outText.includes('�
 state.resolvedSettings.replyMaxChars = 100
 mock.actions.length = 0
 const longText = Array.from({ length: 20 }, (_, i) => `第${i + 1}行内容`).join('\n')
+asQQTurn()
 onSessionEvent(
   { id: 'session-target' },
   { type: 'assistant/message', seq: 5, time: Date.now(), data: { turn: 3, step: 1, message: { content: [{ type: 'text', text: `[QQ]${longText}[/QQ]` }] } } },
@@ -451,6 +463,7 @@ check(
 // 9) replyWithQuote：首段带 reply 段，引用触发那条消息（群消息 556 是最后一次带 id 的入站）
 state.resolvedSettings.replyWithQuote = true
 mock.actions.length = 0
+asQQTurn()
 onSessionEvent(
   { id: 'session-target' },
   { type: 'assistant/message', seq: 7, time: Date.now(), data: { turn: 4, step: 1, message: { content: [{ type: 'text', text: '[QQ]好[/QQ]' }] } } },
