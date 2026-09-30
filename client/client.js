@@ -135,28 +135,43 @@ window.__ModuleLoader__.load({
     /**
      * 会话下拉的选项：真实的会话列表 + 「不驱动」+ 一个兜底项。
      *
-     * 兜底项是必要的：配置里那个 id 可能**不在**当前列表里（别的工作区、已被归档、
-     * 或者宿主还没加载完）。直接把它丢掉的话，用户一保存就把配置清空了。
+     * **归档的会话不列出来**（用户报的 bug：下拉里混进了一堆早就归档的会话）——
+     * 归档集在 workspace 域：`ctx.workspaces.list.getSnapshot().archivedSessionIds`。
+     *
+     * 两个兜底项都是必要的：
+     * - 配置里那个 id 可能**不在**列表里（别的工作区、宿主还没加载完）；
+     * - 也可能**正好是归档的**（用户刚把它归档了）。
+     * 两种都必须保留成选项，否则用户一保存就把目标会话清空了。
      */
-    function sessionOptions(state, current) {
+    function sessionOptions(state, current, archivedIds) {
+      const archived = new Set((Array.isArray(archivedIds) ? archivedIds : []).map((id) => String(id)))
       const out = [{ value: '', label: '（不驱动任何会话）' }]
       const ids = Array.isArray(state?.ids) ? state.ids : []
       const byId = state && typeof state.byId === 'object' && state.byId ? state.byId : {}
+      const cur = String(current ?? '')
       const seen = new Set([''])
       for (const id of ids) {
         const key = String(id)
+        const isArchived = archived.has(key)
+        // 归档的一律不显示 —— 除非它就是当前选中的那个（不显示的话就没法保留/换掉了）
+        if (isArchived && key !== cur) continue
         seen.add(key)
         const row = byId[id] ?? {}
         const title = typeof row.displayTitle === 'string' && row.displayTitle !== '' ? row.displayTitle : key
-        out.push({ value: key, label: row.running ? `${title}（运行中）` : title })
+        out.push({
+          value: key,
+          label: `${title}${row.running ? '（运行中）' : ''}${isArchived ? '（已归档）' : ''}`,
+        })
       }
-      const cur = String(current ?? '')
-      if (cur !== '' && !seen.has(cur)) out.push({ value: cur, label: `${cur}（不在会话列表里）` })
+      if (cur !== '' && !seen.has(cur)) {
+        out.push({ value: cur, label: `${cur}（${archived.has(cur) ? '已归档' : '不在会话列表里'}）` })
+      }
       return out
     }
 
-    /** 没有 sessions 服务（或它还没就绪）时用的稳定空快照 —— 必须稳定，否则 useSyncExternalStore 会死循环。 */
+    /** 没有 sessions / workspaces 服务（或它们还没就绪）时用的稳定空快照 —— 必须稳定，否则 useSyncExternalStore 会死循环。 */
     const EMPTY_SESSION_LIST = { ids: [], byId: {} }
+    const EMPTY_WORKSPACES = { archivedSessionIds: [] }
 
     // ── 样式（内联，跟随主题文字色） ──────────────────────────────────────────
     const BORDER = '1px solid rgba(127,127,127,0.35)'
@@ -236,6 +251,23 @@ window.__ModuleLoader__.load({
         if (sessions && typeof sessions.refresh === 'function') Promise.resolve(sessions.refresh()).catch(() => {})
       }, [sessions])
 
+      // 归档集在 workspace 域：ctx.workspaces.list 的快照里有 archivedSessionIds
+      //（"Complete registry-global archive set"）。取不到就当作「没有归档的会话」——
+      // 宁可多列几个，也别把用户能选的会话藏掉。
+      const workspaces = props.workspacesOf ? props.workspacesOf() : undefined
+      const wsStore =
+        workspaces && workspaces.list && typeof workspaces.list.getSnapshot === 'function' ? workspaces.list : undefined
+      const wsSubscribe = react.useCallback((cb) => (wsStore && typeof wsStore.subscribe === 'function' ? wsStore.subscribe(cb) : () => {}), [wsStore])
+      const wsGetSnapshot = react.useCallback(() => {
+        if (!wsStore) return EMPTY_WORKSPACES
+        try {
+          return wsStore.getSnapshot() ?? EMPTY_WORKSPACES
+        } catch {
+          return EMPTY_WORKSPACES
+        }
+      }, [wsStore])
+      const workspaceSnapshot = react.useSyncExternalStore(wsSubscribe, wsGetSnapshot)
+
       function change(key) {
         return (event) => {
           const next = { ...shown }
@@ -311,7 +343,9 @@ window.__ModuleLoader__.load({
           control = h(
             'select',
             { style: S.input, value: String(value), disabled: !snap.writable || busy, onChange: change(f.key) },
-            sessionOptions(sessionList, value).map((o) => h('option', { key: o.value || '(none)', value: o.value }, o.label)),
+            sessionOptions(sessionList, value, workspaceSnapshot?.archivedSessionIds).map((o) =>
+              h('option', { key: o.value || '(none)', value: o.value }, o.label),
+            ),
           )
         } else {
           control = h('input', {
@@ -409,7 +443,7 @@ window.__ModuleLoader__.load({
             // sessionsOf 用「取的时候再解析」而不是现在取一次：
             // sessions 服务可能比本插件晚出现，也可能这个部署根本没装 —— 那时卡片照常渲染，
             // 只是目标会话那一栏只有一个兜底项，而不是整张卡片消失。
-            () => h(Card, { scope, sessionsOf: () => ctx.get('sessions') }),
+            () => h(Card, { scope, sessionsOf: () => ctx.get('sessions'), workspacesOf: () => ctx.get('workspaces') }),
           ),
         )
       })
@@ -420,6 +454,9 @@ window.__ModuleLoader__.load({
     // 导出 name：Cordis 用它做插件标识，Slots inspect 里的 registrant 会显示成它
     // （不导的话那边显示的是产物里的 fallback 短名，排障时认不出是谁注册的卡片）。
     exports.name = 'dsh-qq-bridge'
+    // 纯函数给离线测试用（test-smoke.mjs 会在假 ctx 里真跑这个 bundle）。
+    // Cordis 只认 apply / inject / name / Config，多余的导出它不管。
+    exports.__test = { sessionOptions, draftFrom, parse }
     return module.exports
   },
 })

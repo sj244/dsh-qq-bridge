@@ -744,8 +744,9 @@ window.__ModuleLoader__.load({
 | 订阅（配 `useSyncExternalStore`） | `scope.subscribe(cb)` + `scope.getSnapshot()`（快照引用稳定到下次变化） |
 | 写一项 | `await scope.set(field, value)`，值是 JSON 形状；写的是**用户层**，即时生效 |
 | 恢复默认 | `scope.unset(field)`；`snapshot.user` 里**存在该字段**即「已被覆盖」 |
+| 会话下拉的数据源 | `ctx.sessions.list`（`ids[]` + `byId[id].displayTitle`）＋ `ctx.sessions.refresh()` |
+| **过滤归档会话** | `ctx.workspaces.list.getSnapshot().archivedSessionIds`（workspace 域的归档集；不下拉归档的会话） |
 | 注册卡片 | `ctx.slots.register({ name: 'settings.plugin.item', key: 'qq-bridge' }, Cell)` |
-| 会话下拉的数据源 | `ctx.sessions.list`（`ObservableSnapshot<SessionListState>`：`ids[]` + `byId[id].displayTitle`），另有 `ctx.sessions.refresh()` |
 
 > ⚠️ **最容易踩的一条**：卡片 `key` 必须**逐字等于**宿主注册的 settings 命名空间。
 > 不一致不会报错，界面上就是静默什么都不出现。`test-smoke.mjs` 有断言盯着这个一致性

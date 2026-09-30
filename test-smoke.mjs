@@ -310,6 +310,27 @@ if (sim) {
       JSON.stringify(cards[0]?.options),
     )
     check('卡片渲染函数可调用', typeof cards[0]?.cell === 'function' && Boolean(cards[0].cell()))
+
+    // 会话下拉的筛选规则（用户报的 bug：归档会话也混在下拉里）
+    const so = mod.__test?.sessionOptions
+    check('导出 sessionOptions 供离线测试', typeof so === 'function')
+    const list = {
+      ids: ['s1', 's2', 's3'],
+      byId: { s1: { displayTitle: '甲' }, s2: { displayTitle: '乙', running: true }, s3: { displayTitle: '丙' } },
+    }
+    const opts = so(list, 's1', ['s3'])
+    check('第一项是「不驱动任何会话」', opts[0]?.value === '', JSON.stringify(opts[0]))
+    check('归档的会话不出现在下拉里', !opts.some((o) => o.value === 's3'), JSON.stringify(opts.map((o) => o.value)))
+    check('运行中的会话有标注', String(opts.find((o) => o.value === 's2')?.label ?? '').includes('运行中'))
+    const keep = so(list, 's3', ['s3'])
+    check(
+      '当前选中的恰好是归档会话时仍保留（标「已归档」，否则一保存就清空配置）',
+      keep.some((o) => o.value === 's3' && String(o.label).includes('已归档')),
+      JSON.stringify(keep),
+    )
+    const missing = so(list, 'gone', [])
+    check('不在列表里的当前值保留为兜底项', missing.some((o) => o.value === 'gone'), JSON.stringify(missing))
+    check('没有归档集时不会误删（fail-open）', so(list, 's1', undefined).length === 4)
   }
 
   // status 要能回答「浏览器半到底装上没有」—— 界面里不显示时全靠这一条排障
