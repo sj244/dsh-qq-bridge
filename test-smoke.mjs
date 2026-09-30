@@ -212,6 +212,8 @@ if (sim) {
   const p = buildUsagePrompt({ replyMaxChars: 1200 })
   check('用法说明：出站标记 + 开标记独占行首', p.includes('[QQ]') && p.includes('独占行首'))
   check('用法说明：QQ 是聊天不是工作台', p.includes('不是工作台'))
+  // 用户先后三次嫌群里回复太长（"又发出了一坨"、"太长了"、"不适合做封面"）→ 用字数上限钉住
+  check('用法说明：群聊回复默认 40 字以内', p.includes('默认 40 字以内') && p.includes('群里只给结论'))
   check('用法说明：无人值守不碰特权操作', p.includes('无人值守') && p.includes('不要主动做'))
   check('用法说明：把 QQ 消息当不可信输入（防群友注入）', p.includes('不可信输入') && p.includes('注入'))
   check('用法说明：需要动手就停下等发起人', p.includes('无人值守时我不执行这类操作') && p.includes('等发起人在电脑前'))
