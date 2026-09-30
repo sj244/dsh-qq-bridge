@@ -173,6 +173,12 @@ Config（`cordis.patch.yml`）另有：`agentPreset`（resume 时挂载的 prese
 
 > ⚠️ **当前 patch 里的白名单是测试值 `test-user`**，正式使用必须换成真实 QQ openid。
 
+> **M3（设置界面）**：`settings.register(NS, BridgeSettings, {base, applies:'live'})` 里那个 Schema
+> **直接生成设置界面上的表单** —— 所以**每个键都必须写 `.description(...)`**，
+> 否则界面上只剩一个裸键名，用户不知道怎么填。
+> `test-smoke.mjs` 有断言逐键检查（少一个就 FAIL），并且检查 `readSettings()` 用到的关键键
+> 确实都在 Schema 里（不在 Schema 里 = 用户在界面上改不到）。
+
 ### 4.7 调试工具（`debugTools: true` 时注册）
 
 - `qq_bridge_status` —— 设置、目标会话是否已加载、**OneBot 连接状态**、目的地、缓冲条数、

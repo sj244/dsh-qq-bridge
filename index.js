@@ -98,30 +98,33 @@ export const Config = Schema.object({
 
 // 用户可编辑设置：注册成 settings 命名空间后，会持久化到 settings.yaml，
 // 并出现在 Settings 界面里（昵称 / 白名单 / 概率 / 目标会话 / 传输都在这）。
+//
+// ⚠️ **每个键都要有 description**：这个 Schema 直接生成设置界面上的表单，
+// 没有描述就只剩一个裸键名，用户根本不知道该怎么填（M3）。
 const BridgeSettings = Schema.object({
-  targetSessionId: Schema.string().default(''),
-  nicknames: Schema.array(Schema.string()).default(['244']),
-  wakeProbability: Schema.number().default(0.05),
-  whitelist: Schema.array(Schema.string()).default([]),
-  groupWhitelist: Schema.array(Schema.string()).default([]),
-  attachRecentChat: Schema.boolean().default(true),
-  recentChatLimit: Schema.number().default(DEFAULT_RECENT_CHAT_LIMIT),
-  replyMaxChars: Schema.number().default(1500),
+  targetSessionId: Schema.string().default('').description('固定目标会话 id —— 决定"在跟哪个会话说话"；留空 = 不驱动任何会话。'),
+  nicknames: Schema.array(Schema.string()).default(['244']).description('叫到这些名字必然唤醒；可加多个（如 244、猫猫）。'),
+  wakeProbability: Schema.number().default(0.05).description('既没被 @、也没叫名字时，按这个概率唤醒（0–1）。默认 0.05 = 5%；嫌耗 token 就调小。'),
+  whitelist: Schema.array(Schema.string()).default([]).description('允许唤醒的**私聊** QQ 号；空 = 谁都不能唤醒（fail-closed）。'),
+  groupWhitelist: Schema.array(Schema.string()).default([]).description('允许唤醒的**群**号；空 = 任何群都不唤醒。'),
+  attachRecentChat: Schema.boolean().default(true).description('唤醒时，是否把"未唤醒期间"的聊天记录一并附上。'),
+  recentChatLimit: Schema.number().default(DEFAULT_RECENT_CHAT_LIMIT).description('上面那段摘要最多带最近几条（0–200）。'),
+  replyMaxChars: Schema.number().default(1500).description('单条出站消息的字数上限（下限 100）；超长自动分段发送。'),
   // M2
-  onebotUrl: Schema.string().default(''),
-  accessTokenEnv: Schema.string().default('').role('credential-ref'),
-  selfId: Schema.string().default(''),
-  replyWithQuote: Schema.boolean().default(false),
-  atOnlyInGroup: Schema.boolean().default(false),
-  stripMarkdown: Schema.boolean().default(true),
-  replyMode: Schema.string().default('marker'),
-  visionModel: Schema.string().default(''),
+  onebotUrl: Schema.string().default('').description('NapCat 的正向 WS 地址，如 ws://127.0.0.1:3001；留空 = 完全不启用传输。'),
+  accessTokenEnv: Schema.string().default('').role('credential-ref').description('access_token 所在的**凭据引用名**（环境变量名）；别写明文 token。'),
+  selfId: Schema.string().default('').description('机器人自己的 QQ 号；留空 = 连上后自动获取。'),
+  replyWithQuote: Schema.boolean().default(false).description('回复时引用触发的那条消息。'),
+  atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
+  stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
+  replyMode: Schema.string().default('marker').description("出站闸门：'marker' = 只发 [QQ]…[/QQ] 块里的内容（默认，防刷屏）；'always' = 整轮回复都发（旧行为，慎用）。"),
+  visionModel: Schema.string().default('').description('给图片写描述的多模态模型，形如 provider/model；留空 = 自动找第一个支持图片输入的模型。'),
   // M5
-  napcatInstallDir: Schema.string().default(''),
-  napcatVersion: Schema.string().default(''),
-  downloadProxy: Schema.string().default(''),
-  onebotPort: Schema.number().default(3001),
-  qqNumber: Schema.string().default(''),
+  napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
+  napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本 tag（如 v4.18.28）；留空 = 最新。'),
+  downloadProxy: Schema.string().default('').description('下载 NapCat 用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
+  onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
+  qqNumber: Schema.string().default('').description('快速登录用的 QQ 号（需先成功登录过一次）。'),
 })
 
 /** OneBot 非文本消息段 → 可读占位符。

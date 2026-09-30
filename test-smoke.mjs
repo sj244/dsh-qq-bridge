@@ -15,10 +15,11 @@ const warnings = []
 // settings.get() 在真实运行时返回「composition base + 用户层」的合并值，
 // 这里必须如实模拟，否则 config 里的白名单/昵称会被丢掉。
 let resolvedSettings = {}
+const registeredSettings = []
 const ctx = {
   logger: { info() {}, warn: (m) => warnings.push(String(m)) },
   settings: {
-    register: (_ns, _schema, opts) => { resolvedSettings = { ...(opts?.base ?? {}) }; return {} },
+    register: (ns, schema, opts) => { registeredSettings.push({ ns, schema }); resolvedSettings = { ...(opts?.base ?? {}) }; return {} },
     get: () => resolvedSettings,
   },
   agents: { get: () => undefined, roots: () => [], resume: async () => { throw new Error('smoke: no agent factory') } },
@@ -217,6 +218,21 @@ if (sim) {
     p.includes('qq_bridge_listen') && p.includes('off: true') && p.includes('60 分钟') && p.includes('别无脑常开'),
   )
   check('用法说明：截断阈值跟着 replyMaxChars 走', p.includes('1200 字'), p.slice(0, 80))
+}
+
+// M3：settings Schema 直接生成设置界面上的表单 —— 每个键都必须有说明，否则界面里只剩裸键名
+{
+  const reg = registeredSettings[0]
+  check('注册了 settings 命名空间 qq-bridge', registeredSettings.length === 1 && reg?.ns === 'qq-bridge', String(reg?.ns))
+  const dict = reg?.schema?.dict ?? {}
+  const keys = Object.keys(dict)
+  check('settings 键数量符合预期（21）', keys.length === 21, `实际 ${keys.length}`)
+  const missing = keys.filter((k) => String(dict[k]?.meta?.description ?? '').trim() === '')
+  check('每个 settings 键都有说明（设置界面里能看懂）', missing.length === 0, missing.join(', '))
+  // readSettings() 会读到的键必须都在 Schema 里，否则用户在界面上改不到它
+  const want = ['targetSessionId', 'nicknames', 'wakeProbability', 'whitelist', 'groupWhitelist', 'replyMode', 'visionModel']
+  const absent = want.filter((k) => !keys.includes(k))
+  check('关键键都在 Schema 里（界面上改得到）', absent.length === 0, absent.join(', '))
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
