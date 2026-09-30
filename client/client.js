@@ -107,7 +107,20 @@ window.__ModuleLoader__.load({
         kind: 'text',
         hint: 'NapCat 的正向 WS 地址，如 ws://127.0.0.1:3001；留空 = 完全不启用传输。',
       },
-      { key: 'accessTokenEnv', label: 'Token 凭据名', kind: 'text', hint: 'access_token 所在的凭据引用名（环境变量名）；**别写明文 token**。留空 = 不用 token。' },
+      {
+        key: 'accessTokenEnv',
+        label: 'OneBot Token 凭据名',
+        kind: 'text',
+        hint: '指 **NapCat / OneBot 的 access_token** 存在哪个环境变量里 —— 填「变量名」（如 NAPCAT_TOKEN），不是 token 本身；NapCat 没开 token 校验就留空。⚠️ 不是模型 API key（DeepSeek 等），两者无关，别填错。',
+        check: (v) => {
+          const s = String(v ?? '').trim()
+          if (s === '') return null
+          if (/^(sk-|Bearer\s)/i.test(s) || s.length > 64 || /[.\s]/.test(s)) {
+            return '这看起来像一串 token —— 这一栏要填的是「存它的环境变量名」（如 NAPCAT_TOKEN），不是 token 本身。'
+          }
+          return null
+        },
+      },
       { key: 'selfId', label: '机器人 QQ', kind: 'text', hint: '留空 = 连上后自动获取。' },
       // ↓ 这些键以前只在 Schema 里、卡片上没做输入框，等于"设了也改不了"（用户报的正是这个）
       {
@@ -396,7 +409,8 @@ window.__ModuleLoader__.load({
                   'div',
                   { style: S.hint },
                   // 会话下拉额外把真实 id 显示出来：看着名字选，但真要手抄/核对时 id 就在旁边
-                  f.kind === 'session' && String(value) !== '' ? `${f.hint}当前：${value}` : f.hint,
+                  (f.kind === 'session' && String(value) !== '' ? `${f.hint}当前：${value}` : f.hint) +
+                    (typeof f.check === 'function' && f.check(value) ? `\n⚠️ ${f.check(value)}` : ''),
                 )
               : null,
           ),
