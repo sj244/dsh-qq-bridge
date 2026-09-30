@@ -260,6 +260,7 @@ QQ 的表情、表情包、图片、语音、视频、文件、卡片、合并�
 | `attachRecentChat` / `recentChatLimit` | `true` / `8` | 未唤醒聊天是否附给下次唤醒、条数 |
 | `replyMaxChars` | `1500` | 出站分段上限（下限 100） |
 | `replyMode` | `'marker'` | **出站方式开关**：`'marker'` 标记块（默认）｜`'tool'` 关掉标记块、改用 `qq_bridge_send` 工具｜`'always'` 整轮都发 |
+| `delivery` | `'auto'` | **投递方式**：`'auto'`（默认）目标正忙就**插话**（`steer`，在下一个 step 边界塞进去）、空闲时排队｜`'followup'` 永远排成独立一轮｜`'steer'` 总是插话 |
 | `visionModel` | `''` | 给图片写描述的多模态模型（`"provider/model"`）；空 = 自动找 |
 | `onebotUrl` | `''` | NapCat 正向 WS 地址；空 = 不启用传输 |
 | `accessTokenEnv` | `''` | access_token 的凭据引用名 |

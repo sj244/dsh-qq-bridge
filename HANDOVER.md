@@ -887,6 +887,30 @@ turnActive           有没有一轮正在跑（决定注入时能不能直接"�
 > `mine`/`kind` 猜出来的，非 ours 的 plugin 消息会被标成"pending 不变"，而代码其实把它打成了
 > false —— 正是这个错误的标签让我第一眼没看出问题。**诊断信息必须由真实分支产生，不能另算一遍。**
 
+## 17.5 投递方式：排队还是**插话**（`delivery`，2026-09-30 用户提出）
+
+用户报的现象：「QQ 消息发出去之后，你那边只是显示一个队列，必须我来推送你」——
+QQ 说的话排在队尾、要等当前那轮跑完才被处理。聊天要的是**插话**。
+
+**宿主 loop 的 Agent 本来就给了三个通道**（`@deepseek-ai/dsh-agent-loop` 的 `ReactLoopAgent`）：
+
+| 方法 | 文档原话 | 语义 |
+|---|---|---|
+| `followup(msg)` | "Queue an ordinary follow-up turn and wake the driver. The item becomes the **sole ordinary message of its own turn**." | 排一轮自己的 turn（旧行为，最 durable） |
+| **`steer(msg)`** | "Submit steering for the nearest step. **An idle driver starts a turn**; a running driver consumes it at its next step boundary." | **插话**；空闲时也会起一轮，**不会丢** |
+| `inject(msg)` | "Queue model-facing context for the next pre-step **without waking** the driver." | 只进上下文、不唤醒 |
+
+另有权威状态 `agent.status`（`'idle' | 'running'`）可判断目标忙不忙 —— 比自己从事件推更可靠。
+
+`delivery: 'auto' | 'followup' | 'steer'`（默认 `auto`）：
+- `auto`：`status === 'running'` → `steer`；否则 `followup`。
+- 取不到 `status` 或没有 `steer` → 退回 `followup`（fail-safe）。
+
+> ⚠️ **插话必须同时把归属算成 QQ**：`steer` 把消息塞进**正在跑的那一轮**，而那一轮可能是
+> DSH 起的（`currentTurnFromQQ === false`）→ 模型在这一轮里回话时工具会被拒，**插话反而哑火**。
+> 所以 `wantSteer` 时额外 `currentTurnFromQQ = true`。测试里有一条专门盯它。
+
+
 **消息来源的形状**（rc.3 类型里核实过）：`MessageSourceMap` =
 `{kind:'user'}` / `{kind:'plugin', plugin}` / `{kind:'model'}` / `{kind:'tool'}`；
 `turn/start` 只有 `{turn}`；`user/message` 的 `data` **就是** `UserMessage`（也可能被包成

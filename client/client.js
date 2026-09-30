@@ -82,6 +82,17 @@ window.__ModuleLoader__.load({
         ],
         hint: '标记块 = 只发块里的内容；工具调用 = 关掉标记块、改用 qq_bridge_send 发送（每轮多一次模型调用，但发不出去时有明确反馈）；整轮都发 = 技术内容也会进群，慎用。',
       },
+      {
+        key: 'delivery',
+        label: '投递方式',
+        kind: 'select',
+        options: [
+          ['auto', '自动（忙时插话）'],
+          ['followup', '排队'],
+          ['steer', '总是插话'],
+        ],
+        hint: 'QQ 消息怎么进目标会话：自动 = 目标正忙就插话（在下一个 step 边界塞进去）、空闲时排队；排队 = 永远排成独立一轮（更稳）；总是插话 = 无论忙闲都插。',
+      },
       { key: 'replyWithQuote', label: '引用原消息', kind: 'boolean', hint: '回复时引用触发的那条消息。' },
       { key: 'stripMarkdown', label: '去掉 Markdown', kind: 'boolean', hint: '出站前去掉 Markdown 标记（QQ 不渲染）。' },
       {

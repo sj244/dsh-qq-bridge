@@ -80,6 +80,7 @@ export const Config = Schema.object({
   atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
   stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
   replyMode: Schema.string().default('marker').description("出站方式：'marker'（默认，只发 [QQ]…[/QQ] 块里的内容）｜'tool'（不用标记块，改由 qq_bridge_send 工具发送）｜'always'（整轮回复都发，旧行为）。"),
+  delivery: Schema.string().default('auto').description("QQ 消息怎么投递给目标会话：'auto'（默认，**目标正忙就插话** steer、空闲时排队）｜'followup'（永远排队成独立一轮）｜'steer'（永远插话）。"),
   visionModel: Schema.string().default('').description('用来给图片写描述的多模态模型，"provider/model"；留空 = 自动找第一个支持图片输入的模型。'),
   heartbeatTimeoutMs: Schema.number().default(90000).description('多久没有任何 WS 流量就判定连接已死并重连。'),
   // ── M5：NapCat 自助托管 ───────────────────────────────────────────────────
@@ -121,6 +122,7 @@ const BridgeSettings = Schema.object({
   atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
   stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
   replyMode: Schema.string().default('marker').description("出站闸门（开关）：'marker' = 标记块发送（默认）｜'tool' = **关掉标记块**，改用 qq_bridge_send 工具发送｜'always' = 整轮都发（旧行为，慎用）。"),
+  delivery: Schema.string().default('auto').description("投递方式：'auto' = 目标正忙时**插话**（steer）、空闲时排队（默认，最像群聊）｜'followup' = 永远排队成独立一轮｜'steer' = 永远插话。"),
   visionModel: Schema.string().default('').description('给图片写描述的多模态模型，形如 provider/model；留空 = 自动找第一个支持图片输入的模型。'),
   // M5
   napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
@@ -203,6 +205,7 @@ export function apply(ctx, config) {
       atOnlyInGroup: config.atOnlyInGroup === true,
       stripMarkdown: config.stripMarkdown !== false,
       replyMode: normalizeReplyMode(config.replyMode),
+      delivery: normalizeDelivery(config.delivery),
       napcatInstallDir: config.napcatInstallDir ?? '',
       napcatVersion: config.napcatVersion ?? '',
       downloadProxy: config.downloadProxy ?? '',
@@ -236,6 +239,7 @@ export function apply(ctx, config) {
       atOnlyInGroup: s.atOnlyInGroup === true,
       stripMarkdown: s.stripMarkdown !== false,
       replyMode: normalizeReplyMode(s.replyMode),
+      delivery: normalizeDelivery(s.delivery),
       visionModel: String(s.visionModel ?? config.visionModel ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
       napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
@@ -788,24 +792,39 @@ export function apply(ctx, config) {
     const injected = makeMessage(text, imageBlocks)
     lastInjectedMessageId = injected?.id ?? null
 
-    // ⚠️⚠️ **必须在 send() 之前置位**。`agent.followup()` 会**同步**启动这一轮 ——
+    // 投递方式（`delivery` 设置）——宿主 loop 的 Agent 有三个现成通道：
+    //   followup: 排一轮自己的 turn（旧行为，最durable）
+    //   steer   : **插话** —— 空闲时直接起一轮，正在跑就在下一个 step 边界塞进去
+    //   inject  : 只进上下文、不唤醒（这里不用）
+    // 'auto'（默认）：**正在跑就插话**（QQ 聊天的直觉就是要能打断），空闲时照常排队。
+    // `agent.status` 是宿主的权威状态（'idle' | 'running'）；取不到就退回 followup。
+    const running = agent?.status === 'running'
+    const wantSteer = s.delivery === 'steer' || (s.delivery !== 'followup' && running)
+
+    // ⚠️⚠️ **必须在 send() 之前置位**。`followup()` 会**同步**启动这一轮 ——
     // `turn/start` 当场就到达，而它会快照 pending/claim。晚一步置位 = "标还没立、轮已经开了"，
     // 整轮哑火。（2026-09-30 真机抓到的时序：gate = { pending: true, current: false,
     // turnActive: true, claimed: false } —— pending 对、current 错，就是置位晚了一拍的指纹。）
     pendingFromQQ = true
-    // 没有正在跑的轮就顺手认领这一轮；有正在跑的轮则不能改它 —— 这条消息会自己起一轮，
-    // 那时候 turn/start 会用 pendingFromQQ 快照。
+    // 没有正在跑的轮就顺手认领这一轮（会观察到 turn/start）；有正在跑的轮则不能改它。
     if (!turnActive) {
       currentTurnFromQQ = true
       claimedFromQQ = true
     }
+    // 插话插进的是**正在跑的那一轮**：从这一刻起这一轮里就有 QQ 消息要回，
+    // 所以归属也得跟着算 QQ —— 否则工具会在这一轮里被拒，插话反而变成哑火。
+    if (wantSteer) currentTurnFromQQ = true
 
-    const send = () => agent.followup(injected)
+    const send = () => {
+      if (wantSteer && typeof agent.steer === 'function') return agent.steer(injected)
+      return agent.followup(injected)
+    }
     try {
       ctx.agents.withInitiator(agent, send)
     } catch {
       send()
     }
+    logger.info(`已投递 QQ 消息（${wantSteer ? 'steer 插话' : 'followup 排队'}${running ? '，目标正忙' : ''}）`)
     // 只移除**确实进了这次摘要**的那些条目（按对象身份），
     // 期间新到的消息要留在缓冲里等下一次唤醒。
     state.buffer = state.buffer.filter((m) => !bufferSnapshot.includes(m))
@@ -1691,6 +1710,11 @@ export function apply(ctx, config) {
 /** 出站方式的归一化：只认 'marker' | 'tool' | 'always'，别的一律当 'marker'。导出是为了可测试。 */
 export function normalizeReplyMode(raw) {
   return raw === 'always' || raw === 'tool' ? raw : 'marker'
+}
+
+/** 投递方式的归一化：只认 'auto' | 'followup' | 'steer'，别的一律当 'auto'。导出是为了可测试。 */
+export function normalizeDelivery(raw) {
+  return raw === 'followup' || raw === 'steer' ? raw : 'auto'
 }
 
 function clamp01(n) {

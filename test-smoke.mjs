@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, labelForSegment, normalizeReplyMode, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, labelForSegment, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -488,8 +488,63 @@ if (sim) {
   const sent = JSON.parse(await sendTool.execute({ text: '端到端：这条应该发得出去' }))
   check('端到端：注入之后工具可用', sent.refused !== true && lastText(await outbox()) === '端到端：这条应该发得出去', JSON.stringify(sent))
 
+  // ── 投递方式：目标正忙时该不该插话 ────────────────────────────────────────
+  check(
+    'normalizeDelivery：只认三个值，其余归 auto',
+    normalizeDelivery('steer') === 'steer' &&
+      normalizeDelivery('followup') === 'followup' &&
+      normalizeDelivery('auto') === 'auto' &&
+      normalizeDelivery('乱写') === 'auto' &&
+      normalizeDelivery(undefined) === 'auto',
+  )
+
+  let steered = 0
+  let followed = 0
+  const makeAgent = (status) => ({
+    id: 'session-smoke',
+    status,
+    ctx: { get: () => undefined, effect: () => () => {} },
+    steer: (msg) => {
+      steered++
+      injected = msg
+      fire('user/message', msg) // 插话：塞进**正在跑的那一轮**，不发 turn/start
+    },
+    followup: (msg) => {
+      followed++
+      injected = msg
+      fire('user/message', msg)
+      fire('turn/start', { turn: 1 })
+    },
+  })
+
+  // 目标正忙 + delivery='auto' → 插话；并且归属要算成 QQ，否则插话反而哑火
+  fire('turn/start', { turn: 1 }) // 已经有轮在跑
+  steered = followed = 0
+  fakeAgent = makeAgent('running')
+  resolvedSettings.delivery = 'auto'
+  await sim.execute({ text: '244 在忙吗', userId: 'test-user' })
+  check('delivery=auto + 目标正忙 → 插话（steer）', steered === 1 && followed === 0, JSON.stringify({ steered, followed }))
+  check('插话之后归属算 QQ（否则插话会变成哑火）', (await gate()).currentTurnFromQQ === true, JSON.stringify(await gate()))
+  fire('turn/end', { reason: { kind: 'completed' } })
+
+  // 目标空闲 + delivery='auto' → 照常排队（更稳），并且能正常起一轮
+  steered = followed = 0
+  fakeAgent = makeAgent('idle')
+  await sim.execute({ text: '244 在吗', userId: 'test-user' })
+  check('delivery=auto + 目标空闲 → 排队（followup）', followed === 1 && steered === 0, JSON.stringify({ steered, followed }))
+  fire('turn/end', { reason: { kind: 'completed' } })
+
+  // delivery='followup'：即使正忙也不插话
+  steered = followed = 0
+  fakeAgent = makeAgent('running')
+  resolvedSettings.delivery = 'followup'
+  fire('turn/start', { turn: 1 })
+  await sim.execute({ text: '244 排队', userId: 'test-user' })
+  check("delivery='followup'：正忙也排队", followed === 1 && steered === 0, JSON.stringify({ steered, followed }))
+
   fakeAgent = null
   resolvedSettings.replyMode = 'marker'
+  delete resolvedSettings.delivery
   fire('turn/end', { reason: { kind: 'completed' } })
 }
 
@@ -499,7 +554,7 @@ if (sim) {
   check('注册了 settings 命名空间 qq-bridge', registeredSettings.length === 1 && reg?.ns === 'qq-bridge', String(reg?.ns))
   const dict = reg?.schema?.dict ?? {}
   const keys = Object.keys(dict)
-  check('settings 键数量符合预期（21）', keys.length === 21, `实际 ${keys.length}`)
+  check('settings 键数量符合预期（22）', keys.length === 22, `实际 ${keys.length}`)
   const missing = keys.filter((k) => String(dict[k]?.meta?.description ?? '').trim() === '')
   check('每个 settings 键都有说明（设置界面里能看懂）', missing.length === 0, missing.join(', '))
   // readSettings() 会读到的键必须都在 Schema 里，否则用户在界面上改不到它
