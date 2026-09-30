@@ -345,6 +345,21 @@ if (sim) {
   // 复位，别影响后面的块
   resolvedSettings.replyMode = 'marker'
   fire('turn/end', { reason: { kind: 'completed' } })
+
+  // 改 replyMode 会走 settings/updated → 重挂用法说明那条路。
+  // 真挂载需要宿主有 systemPrompt 服务（这里没有），所以只验证这条处理器**不抛错** ——
+  // 它顺带能挡住"usagePromptMounted 从 Set 改成 Map 却漏改某处"这类错。
+  let settingsHandlerOk = true
+  try {
+    resolvedSettings.replyMode = 'tool'
+    handlers['settings/updated']?.('qq-bridge')
+    resolvedSettings.replyMode = 'marker'
+    handlers['settings/updated']?.('qq-bridge')
+  } catch (e) {
+    settingsHandlerOk = false
+    console.log('  settings/updated 抛错：', String(e?.message ?? e))
+  }
+  check('改 replyMode 时 settings/updated 处理器不抛错', settingsHandlerOk)
 }
 
 // M3：settings Schema 直接生成设置界面上的表单 —— 每个键都必须有说明，否则界面里只剩裸键名

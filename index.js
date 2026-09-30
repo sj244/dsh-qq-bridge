@@ -351,8 +351,13 @@ export function apply(ctx, config) {
 
   const handles = new Map() // sessionId -> AgentHandle
 
-  /** 已经注入过用法说明的会话 id（每个会话只挂一次）。 */
-  const usagePromptMounted = new Set()
+  /**
+   * 已经注入过用法说明的会话：`sessionId -> { dispose, mode }`。
+   *
+   * 存 `mode` 是因为提示词正文里有**出站方式**（marker / tool / always）的分叉，
+   * 而 `text` 是挂载时算好的快照 —— 模式变了必须重挂。
+   */
+  const usagePromptMounted = new Map()
 
   /**
    * 把「怎么回 QQ」的说明**注入目标会话自己的系统提示**。
@@ -367,17 +372,33 @@ export function apply(ctx, config) {
     const sp = (agentCtx && typeof agentCtx.get === 'function' ? agentCtx.get('systemPrompt') : undefined) ?? ctx.get('systemPrompt')
     const scopedCtx = agentCtx ?? ctx
     if (!sp || !agent?.id) return
-    if (usagePromptMounted.has(agent.id)) return
-    usagePromptMounted.add(agent.id)
+
+    const mode = normalizeReplyMode(readSettings().replyMode)
+    const prev = usagePromptMounted.get(agent.id)
+    // 已经挂过、而且出站方式没变 → 不用重挂。
+    if (prev && prev.mode === mode) return
+
+    // ⚠️ 提示词正文是**挂载时算好的快照**（`text` 是字符串，没法动态求值）。
+    // 出站方式(replyMode)是开关，改了它必须**重挂**，否则模型会照着一个本部署里
+    // 根本不生效的做法回话（用户 2026-09-30 追问「系统提示词更新了吗」时发现的）。
+    if (prev) {
+      try {
+        prev.dispose()
+      } catch (error) {
+        logger.warn(`卸载旧用法说明失败：${error?.message ?? error}`)
+      }
+      usagePromptMounted.delete(agent.id)
+    }
     try {
-      scopedCtx.effect(() =>
+      const dispose = scopedCtx.effect(() =>
         sp.context({
           name: 'qq-bridge',
           order: 500,
           text: buildUsagePrompt(readSettings()),
         }),
       )
-      logger.info(`已向会话 ${agent.id} 注入 QQ 用法说明（scope=${agentCtx ? 'agent' : 'global'}）`)
+      usagePromptMounted.set(agent.id, { dispose: typeof dispose === 'function' ? dispose : () => {}, mode })
+      logger.info(`已向会话 ${agent.id} 注入 QQ 用法说明（出站方式=${mode}，scope=${agentCtx ? 'agent' : 'global'}）`)
     } catch (error) {
       logger.warn(`注入用法说明失败：${error?.message ?? error}`)
     }
@@ -1038,6 +1059,18 @@ export function apply(ctx, config) {
   ctx.on('settings/updated', guarded('settings/updated', (ns) => {
     if (String(ns) !== NS) return
     const s = readSettings()
+
+    // 出站方式是**开关**，而系统提示词正文是**挂载那一刻的快照** —— 改了它必须重挂，
+    // 否则模型会照着一个在本部署里根本不生效的做法回话（用户追问「系统提示词更新了吗」时发现的）。
+    const live = s.targetSessionId ? ctx.agents.get(s.targetSessionId) : undefined
+    if (live) {
+      const mounted = usagePromptMounted.get(live.id)
+      if (mounted && mounted.mode !== s.replyMode) {
+        logger.info(`出站方式 ${mounted.mode} → ${s.replyMode}，重挂用法说明`)
+        mountUsagePrompt(live)
+      }
+    }
+
     const key = `${s.onebotUrl}\u0000${s.accessTokenEnv}`
     if (key === lastTransportKey) return
     lastTransportKey = key

@@ -859,6 +859,12 @@ window.__ModuleLoader__.load({
 > 这正是标记块缺的那个反馈回路。提示词也按模式分叉（`buildUsagePrompt` 会读 `replyMode`），
 > 否则会教模型一个在本部署里根本不生效的做法。
 > `'always'` 仍保留（旧行为），提示词里会明确警告"整轮都会进群"。
+>
+> ⚠️ **提示词是挂载时的快照**：`sp.context({text})` 的 `text` 是字符串，没有动态求值。
+> 所以 `usagePromptMounted` 从 `Set` 改成了 `Map<sessionId, {dispose, mode}>`，
+> `settings/updated` 里发现 `mode` 变了就 **dispose 旧的再重挂**。
+> 不这么做的话，用户把模式从 marker 换成 tool 之后，提示词还在教标记块 ——
+> 而模型会老老实实照做，只在"群里半天没动静"时才暴露（用户追问「系统提示词更新了吗」时发现的）。
 
 ### `onebot.js`（M2 传输层）
 
