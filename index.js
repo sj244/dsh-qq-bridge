@@ -797,7 +797,10 @@ export function apply(ctx, config) {
     pendingFromQQ = true
     // 没有正在跑的轮，就直接认领下一轮（不依赖一定观察到 turn/start）；
     // 有正在跑的轮，就不能改它 —— 这条消息会自己起一轮，那时候 turn/start 会快照 pendingFromQQ。
-    if (!turnActive) currentTurnFromQQ = true
+    if (!turnActive) {
+      currentTurnFromQQ = true
+      claimedFromQQ = true
+    }
     // 只移除**确实进了这次摘要**的那些条目（按对象身份），
     // 期间新到的消息要留在缓冲里等下一次唤醒。
     state.buffer = state.buffer.filter((m) => !bufferSnapshot.includes(m))
@@ -1107,6 +1110,8 @@ export function apply(ctx, config) {
   let pendingFromQQ = false
   let currentTurnFromQQ = false
   let turnActive = false
+  /** 注入时对"下一轮"的直接认领（只可能由我们自己的注入置位，比 pending 权威）。 */
+  let claimedFromQQ = false
 
   /**
    * 最近一次注入的 QQ 消息 id —— 用来**认出**「这条 user/message 就是我们自己灌进去的」。
@@ -1148,11 +1153,14 @@ export function apply(ctx, config) {
     if (!targetId || session?.id !== targetId) return
     const data = event?.data ?? {}
 
-    // 一轮开始：把"当前轮来源"从"最近一条用户消息"快照下来。
+    // 一轮开始：把"当前轮来源"定下来。
     // 之后中途再来什么消息，都不会改这一轮的判定（这就是两个口子的解药）。
     if (event.type === 'turn/start') {
       turnActive = true
-      currentTurnFromQQ = pendingFromQQ
+      // 注入时的"认领"优先：`claimedFromQQ` **只可能**由我们自己的注入置位，比 pending 更权威。
+      //（早先这里无条件取 pending —— 一旦 pending 被同轮里的别的消息污染（harness 上下文）就哑火。）
+      currentTurnFromQQ = claimedFromQQ || pendingFromQQ
+      claimedFromQQ = false
       return
     }
 
@@ -1161,13 +1169,33 @@ export function apply(ctx, config) {
       const msg = data.message ?? data
       const source = msg?.source ?? {}
       const kind = typeof source.kind === 'string' ? source.kind : 'unknown'
+      const plugin = typeof source.plugin === 'string' ? source.plugin : ''
       const mine = isOurInbound(msg)
       // 只更新 pending：**绝不改正在跑的那一轮**的判定。
-      if (mine) pendingFromQQ = true
-      else if (kind === 'user') pendingFromQQ = false
-      else if (kind === 'plugin') pendingFromQQ = source.plugin === PLUGIN_TAG
-      // tool / model / 未知来源：不动 pending（工具结果也是 user/message）
-      noteInboundProbe(msg, kind, source.plugin, mine, mine ? 'pending=true' : kind === 'user' ? 'pending=false' : 'pending 不变')
+      let effect = 'pending 不变'
+      // ⚠️ 两个条件都要：`mine` 是"认出来了"（消息 id / 正文前缀），`plugin === PLUGIN_TAG`
+      // 是"来源字段还老实"时的兜底。**少任何一个都会哑火** —— 写这段时我先把后者删了，
+      // 测试立刻挂了 8 条（真实链路里前缀一定匹配，但别把正确性押在"一定"上）。
+      if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG)) {
+        pendingFromQQ = true
+        effect = 'pending=true（我们自己注入的 QQ 消息）'
+      } else if (kind === 'user') {
+        pendingFromQQ = false
+        effect = 'pending=false（人在 DSH 里打字）'
+      } else if (kind === 'plugin' && plugin.startsWith('@deepseek-ai/')) {
+        // ⚠️ **harness 自己注入的上下文也走 user/message + plugin 来源** —— 每轮开头那段
+        // "Current runtime context…" 就是 `@deepseek-ai/dsh-system-prompt` 发的。
+        // 它**不是一轮的触发器**，只是这一轮的内容。早先把它当成"别的插件起的轮" → pending=false，
+        // 紧接着 turn/start 就快照到 false → 工具拒绝（真机哑火第 3 次，2026-09-30）。
+        // 判据：harness 自家的插件包名都带 `@deepseek-ai/` 前缀。
+        effect = '忽略（harness 注入的上下文，不是触发器）'
+      } else if (kind === 'plugin') {
+        pendingFromQQ = false
+        effect = 'pending=false（别的插件起的轮）'
+      } else {
+        effect = `忽略（kind=${kind}，工具结果这类不算触发器）`
+      }
+      noteInboundProbe(msg, kind, plugin, mine, effect)
       return
     }
 
@@ -1189,6 +1217,7 @@ export function apply(ctx, config) {
       const fromQQ = currentTurnFromQQ
       currentTurnFromQQ = false
       turnActive = false
+      claimedFromQQ = false
       if (!raw) return
 
       // 闸门的第一道：**只发 QQ 唤醒的那一轮**。DSH 界面里聊出来的标记块一个字都不发。
@@ -1305,7 +1334,7 @@ export function apply(ctx, config) {
           // 排障用：最近观测到的 user/message 长什么样（哑火时看这里 —— ours=false 就说明没认出来）
           recentInboundSources: inboundProbe.slice(-5),
           // 出站闸门的实时状态：currentTurnFromQQ 才是决定"这一轮发不发"的那个
-          gate: { pendingFromQQ, currentTurnFromQQ, turnActive },
+          gate: { pendingFromQQ, currentTurnFromQQ, turnActive, claimedFromQQ },
           // M3：浏览器半有没有被 web 宿主组合进 boot graph。
           // 界面里看不到卡片时先看这里 —— 最常见的原因是改了 package.json 没重启。
           clientHalf: clientHalfStatus(),

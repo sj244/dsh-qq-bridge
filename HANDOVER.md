@@ -861,6 +861,32 @@ turnActive           有没有一轮正在跑（决定注入时能不能直接"�
 > 测试里 G/H/I 三个用例专门盯这两条（轮内插 DSH 消息不哑火 / DSH 轮内来 QQ 消息不误发 /
 > 多轮延续仍算 QQ 轮）。
 
+> ⚠️ **哑火第 3 次：harness 自己注入的上下文也走 `user/message`**（2026-09-30 真机抓到）。
+> 每轮开头那段 `Current runtime context…` 是插件 **`@deepseek-ai/dsh-system-prompt`** 发的
+> `user/message`，它**在同一轮里紧跟真正的触发消息**。早先把它归成"别的插件起的轮" →
+> `pendingFromQQ = false` → 紧接着 `turn/start` 就快照到 false → 工具拒绝。
+> **它不是触发器，只是这一轮的内容。** 现在的规则：
+>
+> | 来源 | 对 `pendingFromQQ` |
+> |---|---|
+> | 我们自己注入的（消息 id / `[QQ · ` 前缀 / `plugin==='qq-bridge'`） | **true** |
+> | `kind === 'user'`（人在 DSH 里打字） | **false** |
+> | `kind === 'plugin'` 且包名以 `@deepseek-ai/` 开头（harness 自家注入） | **不动** |
+> | 其他 plugin（cron / goal / 第三方） | **false**（严格：别让它们搭 QQ 的顺风车） |
+> | `tool` / `model` / 未知 | **不动**（工具结果也是 `user/message`） |
+>
+> 另外注入时会置 `claimedFromQQ`（对"下一轮"的直接认领），`turn/start` 取
+> `claimedFromQQ || pendingFromQQ` —— 认领优先，**只可能由我们自己的注入置位**，
+> 这样即使 pending 被同轮里的别的消息污染，归属也不会丢。
+>
+> **已知边界**（诚实记一笔）：`pendingFromQQ` 是"最后一条真触发器"的记忆。若出现**一轮完全没有
+> 触发器消息**的轮次（正常链路不会：每轮都由某条消息起），它会继承上一条的记忆。当前按
+> fail-closed 的默认值 + `claimedFromQQ` 兜底，没有实际可复现路径。
+>
+> 顺带修了一处**误导自己的证据**：`recentInboundSources` 里的 `effect` 字段原来是用
+> `mine`/`kind` 猜出来的，非 ours 的 plugin 消息会被标成"pending 不变"，而代码其实把它打成了
+> false —— 正是这个错误的标签让我第一眼没看出问题。**诊断信息必须由真实分支产生，不能另算一遍。**
+
 **消息来源的形状**（rc.3 类型里核实过）：`MessageSourceMap` =
 `{kind:'user'}` / `{kind:'plugin', plugin}` / `{kind:'model'}` / `{kind:'tool'}`；
 `turn/start` 只有 `{turn}`；`user/message` 的 `data` **就是** `UserMessage`（也可能被包成

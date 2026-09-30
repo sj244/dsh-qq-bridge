@@ -290,6 +290,29 @@ if (sim) {
   end()
   check('多轮延续保持 QQ 轮（turn/end 不吞掉归属）', lastText(await outbox()) === '第二轮延续也发得出去', lastText(await outbox()))
 
+  // J) **哑火第 3 次回归（真机实测抓到的那条）**：QQ 消息之后紧跟一条 harness 注入的上下文
+  //    （`@deepseek-ai/dsh-system-prompt` 发的 "Current runtime context…"，它同样走
+  //    user/message + plugin 来源）。它**不是一轮的触发器**，绝不能把 pending 打掉 ——
+  //    真机上就是它让 turn/start 快照到 false，于是工具拒绝（用户当场看到"哑火"）。
+  fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+  fire('user/message', {
+    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
+    message: { id: 'ctx-1', content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes…' }] },
+  })
+  start()
+  reply('[QQ]harness 上下文不该抢走这一轮[/QQ]')
+  end()
+  check('哑火③回归：harness 注入的上下文不影响本轮归属', lastText(await outbox()) === 'harness 上下文不该抢走这一轮', lastText(await outbox()))
+
+  // 但 **harness 上下文不足以认领一轮**：先由真人消息把 pending 打成 false，
+  // 再来一条 harness 上下文 —— 它既不能打掉真归属（上面 J），也不能把归属抬起来。
+  fire('user/message', { source: { kind: 'user' } })
+  fire('user/message', { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' } })
+  start()
+  reply('[QQ]只有 harness 上下文的一轮不该出站[/QQ]')
+  end()
+  check('harness 上下文不足以认领一轮', !sawText(await outbox(), '只有 harness 上下文的一轮'), lastText(await outbox()))
+
   // F) **真机哑火回归**：source 被上游重写成 'user'，但正文就是我们注入的 QQ 入站消息
   //    → 必须仍然按「QQ 唤醒的那一轮」算，否则就是"用户明明用 QQ @ 了却发不出去"。
   fire('user/message', {
