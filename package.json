@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "index.js",
   "description": "Bridge one fixed DSH session to QQ (OneBot/NapCat) and keep its context: fail-closed whitelist, @/nickname wake, configurable-probability wake, everything else only recorded. 把一个固定的 DSH 会话接到 QQ（OneBot/NapCat）：白名单 + @/昵称必唤醒 + 概率唤醒，其余只记录，保留原上下文。",

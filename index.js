@@ -671,7 +671,7 @@ export function apply(ctx, config) {
         content: [
           {
             type: 'text',
-            text: '用一到两句简短的中文描述这张图片：画的是什么；如果是表情包或梗图就说它的含义；有文字的话把文字原样写出来。直接给描述，不要客套话，不要"这张图片显示了"。',
+            text: '先**逐字抄下图里所有可见文字**（卡牌名/技能效果/按钮/界面上的字，一个都别漏、别改写、别总结），再用一两句说明画面是什么、如果是表情包或梗图就点明含义。直接给结果，不要客套话。',
           },
           { type: 'image', attachment: ref },
         ],
@@ -684,7 +684,7 @@ export function apply(ctx, config) {
         try {
           let out = ''
           let finish = ''
-          for await (const chunk of llm.stream({ provider: conf.provider, model: conf.model, messages: [message], maxTokens: 300 })) {
+          for await (const chunk of llm.stream({ provider: conf.provider, model: conf.model, messages: [message], maxTokens: 600 })) {
             if (chunk.type === 'text-delta') out += chunk.text
             if (chunk.type === 'finish') {
               finish = chunk.reason?.kind ?? ''
