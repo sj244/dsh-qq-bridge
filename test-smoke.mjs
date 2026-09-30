@@ -260,6 +260,10 @@ if (sim) {
     console.log('  client 语法错误：', String(e.message))
   }
   check('client/client.js 语法可解析', parses)
+
+  // status 要能回答「浏览器半到底装上没有」—— 界面里不显示时全靠这一条排障
+  const st = JSON.parse(await status.execute({}))
+  check('qq_bridge_status 报告浏览器半状态', st.clientHalf && typeof st.clientHalf === 'object', JSON.stringify(st.clientHalf))
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)

@@ -45,6 +45,8 @@ export const inject = ['agents', 'tools', 'settings']
 // 导出是为了让测试能断言「浏览器半的卡片 key」与它一致 —— 不一致的话界面上会静默什么都不出现。
 export const NS = 'qq-bridge'
 const PLUGIN_TAG = 'qq-bridge'
+/** 包名：与 `client/client.js` 里 `__ModuleLoader__.load({id})` 的值必须一致。 */
+const PACKAGE_NAME = 'dsh-qq-bridge'
 const MAX_BUFFER = 200
 const MAX_LOG = 200
 const MAX_OUTBOX = 50
@@ -1091,6 +1093,37 @@ export function apply(ctx, config) {
 
   // ── 调试工具（config.debugTools 可关） ──────────────────────────────────────
 
+  /**
+   * M3：浏览器半（设置页那张卡片）到底有没有被 web 宿主组合进去。
+   *
+   * `clientModules` 由 dsh-client-modules 提供，只在 web 部署里存在：
+   * 它在**启动时**扫描启用的 loader 条目，把带 `dsh.client` 的包组合成 boot graph。
+   * 所以「改了 package.json 但没重启」在这里一眼就能看出来 —— 那是卡片不显示最常见的原因。
+   */
+  function clientHalfStatus() {
+    const cm = ctx.get('clientModules')
+    if (!cm || typeof cm.clientPath !== 'function') {
+      return { available: false, note: '这个部署没有 clientModules 服务（非 web 部署），设置卡片不适用' }
+    }
+    try {
+      const bundle = cm.clientPath(PACKAGE_NAME) ?? null
+      const graph = typeof cm.graph === 'function' ? cm.graph() : undefined
+      const entry = graph?.entries?.find((e) => e?.id === PACKAGE_NAME)
+      return {
+        available: true,
+        package: PACKAGE_NAME,
+        bundle,
+        inBootGraph: Boolean(entry),
+        cardKey: NS,
+        note: bundle
+          ? '设置 → 插件 → 插件配置 里应该有「QQ 桥接」卡片'
+          : '没找到浏览器半的 bundle：确认 package.json 的 dsh.client 与 exports["./client"]，然后重启 dsh web',
+      }
+    } catch (e) {
+      return { available: true, error: String(e?.message ?? e) }
+    }
+  }
+
   if (config.debugTools) {
     ctx.tools.register(defineTool({
       name: 'qq_bridge_status',
@@ -1116,6 +1149,9 @@ export function apply(ctx, config) {
           })),
           recentLog: state.log.slice(-15),
           recentOutbox: state.outbox.slice(-3),
+          // M3：浏览器半有没有被 web 宿主组合进 boot graph。
+          // 界面里看不到卡片时先看这里 —— 最常见的原因是改了 package.json 没重启。
+          clientHalf: clientHalfStatus(),
           statePath,
         }, null, 2)
       },
