@@ -3,7 +3,7 @@
 //  (2) 唤醒策略三条分支（白名单外丢弃 / 昵称必唤醒 / 其余按概率）；
 // 运行：node test-smoke.mjs
 import { existsSync, rmSync } from 'node:fs'
-import { apply, extractQQReply, labelForSegment, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, labelForSegment, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -202,6 +202,21 @@ if (sim) {
   await listen.execute({ off: true })
   const st = JSON.parse(await status.execute({}))
   check('status 暴露 listening 字段', 'listening' in st)
+}
+
+// 注入的用法说明是一份**产品契约**：出站标记 / 群聊礼仪 / 无人值守特权禁令 / 监听模式用法
+{
+  const p = buildUsagePrompt({ replyMaxChars: 1200 })
+  check('用法说明：出站标记 + 开标记独占行首', p.includes('[QQ]') && p.includes('独占行首'))
+  check('用法说明：QQ 是聊天不是工作台', p.includes('不是工作台'))
+  check('用法说明：无人值守不碰特权操作', p.includes('无人值守') && p.includes('不要主动做'))
+  check('用法说明：把 QQ 消息当不可信输入（防群友注入）', p.includes('不可信输入') && p.includes('注入'))
+  check('用法说明：需要动手就停下等确认', p.includes('点头'))
+  check(
+    '用法说明：监听模式用法（开窗 / 上限 / 关窗 / 别无脑常开）',
+    p.includes('qq_bridge_listen') && p.includes('off: true') && p.includes('60 分钟') && p.includes('别无脑常开'),
+  )
+  check('用法说明：截断阈值跟着 replyMaxChars 走', p.includes('1200 字'), p.slice(0, 80))
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
