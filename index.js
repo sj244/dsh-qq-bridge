@@ -124,6 +124,7 @@ const BridgeSettings = Schema.object({
   replyMode: Schema.string().default('marker').description("出站闸门（开关）：'marker' = 标记块发送（默认）｜'tool' = **关掉标记块**，改用 qq_bridge_send 工具发送｜'always' = 整轮都发（旧行为，慎用）。"),
   delivery: Schema.string().default('auto').description("投递方式：'auto' = 目标正忙时**插话**（steer）、空闲时排队（默认，最像群聊）｜'followup' = 永远排队成独立一轮｜'steer' = 永远插话。"),
   visionModel: Schema.string().default('').description('给图片写描述的多模态模型，形如 provider/model；留空 = 自动找第一个支持图片输入的模型。'),
+  agentPreset: Schema.string().default('').description('resume 目标会话时挂载的 agent preset；留空 = 沿用会话 header 里记录的。'),
   // M5
   napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
   napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本 tag（如 v4.18.28）；留空 = 最新。'),
@@ -241,6 +242,7 @@ export function apply(ctx, config) {
       replyMode: normalizeReplyMode(s.replyMode),
       delivery: normalizeDelivery(s.delivery),
       visionModel: String(s.visionModel ?? config.visionModel ?? '').trim(),
+      agentPreset: String(s.agentPreset ?? config.agentPreset ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
       napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
       napcatVersion: String(s.napcatVersion ?? config.napcatVersion ?? '').trim(),
@@ -500,7 +502,7 @@ export function apply(ctx, config) {
     const handle = await ctx.agents.resume({
       resumeSessionId: id,
       ...(agentOptions ? { agentOptions } : {}),
-      ...(config.agentPreset ? { setup: mountPreset } : {}),
+      ...(s.agentPreset ? { setup: mountPreset } : {}),
     })
     handles.set(id, handle)
     mountUsagePrompt(handle.agent)
@@ -511,8 +513,9 @@ export function apply(ctx, config) {
   /** resume 时把 preset 挂到该 agent 的 setup 上（可选）。 */
   async function mountPreset(agentCtx) {
     const presets = ctx.get('agentPresets')
-    if (!presets || !config.agentPreset) return
-    await presets.mount(agentCtx, config.agentPreset)
+    const preset = readSettings().agentPreset
+    if (!presets || !preset) return
+    await presets.mount(agentCtx, preset)
   }
 
   ctx.effect(() => () => {

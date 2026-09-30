@@ -129,6 +129,12 @@ window.__ModuleLoader__.load({
         kind: 'text',
         hint: '给图片写描述的多模态模型，形如 provider/model（如 deepseek-official/deepseek-v4-flash-vision-exp）；留空 = 自动找（优先名字带 vision 的）。',
       },
+      {
+        key: 'agentPreset',
+        label: 'Agent Preset',
+        kind: 'text',
+        hint: '恢复目标会话时挂载哪个 preset（决定它的人设/人格）；留空 = 沿用会话自己记着的那个。',
+      },
       { key: 'attachRecentChat', label: '附带未唤醒记录', kind: 'boolean', hint: '唤醒时是否把"未唤醒期间"的聊天记录一并附上。' },
       { key: 'recentChatLimit', label: '附带条数', kind: 'number', hint: '上面那段摘要最多带最近几条（0–200）。' },
       { key: 'napcatInstallDir', label: 'NapCat 目录', kind: 'text', hint: 'NapCat 安装目录；留空 = $DSH_HOME/napcat。' },

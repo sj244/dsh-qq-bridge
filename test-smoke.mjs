@@ -558,7 +558,7 @@ if (sim) {
   check('注册了 settings 命名空间 qq-bridge', registeredSettings.length === 1 && reg?.ns === 'qq-bridge', String(reg?.ns))
   const dict = reg?.schema?.dict ?? {}
   const keys = Object.keys(dict)
-  check('settings 键数量符合预期（22）', keys.length === 22, `实际 ${keys.length}`)
+  check('settings 键数量符合预期（23）', keys.length === 23, `实际 ${keys.length}`)
   const missing = keys.filter((k) => String(dict[k]?.meta?.description ?? '').trim() === '')
   check('每个 settings 键都有说明（设置界面里能看懂）', missing.length === 0, missing.join(', '))
   // readSettings() 会读到的键必须都在 Schema 里，否则用户在界面上改不到它
