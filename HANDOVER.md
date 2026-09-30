@@ -833,19 +833,38 @@ window.__ModuleLoader__.load({
 模型同样看得到「你连着 QQ、回话用标记块」。而原来的出站只看「有没有标记块」，
 于是 **DSH 那一轮里出现的标记块也会被发进群**：闸门开在了错误的维度上。
 
-**修法**：一个 `turnFromQQ` 标记 + 两道闸门。
+**修法（第二版：按轮快照）**：三个变量 + 三道闸门。
+
+```
+pendingFromQQ        最近一条 user/message 的来源判断（随时更新，**不改正在跑的轮**）
+currentTurnFromQQ    当前轮的快照 —— turn/start 时从 pending 取，turn/end 时消费掉
+turnActive           有没有一轮正在跑（决定注入时能不能直接"认领下一轮"）
+```
 
 | 时机 | 动作 |
 |---|---|
-| `handleInbound` 注入时 | **直接置位**（注入方最清楚这一轮是谁叫的，不依赖观察到自己的事件） |
-| `user/message`，`source.kind==='plugin'` 且 `plugin===PLUGIN_TAG` | 置位 |
-| `user/message`，`source.kind==='user'`（人在 DSH 里打字）或**别的插件**注入 | **清除** |
-| `user/message`，`source.kind` 是 `tool` / `model` | **不动标记** —— 工具结果也是 `user/message`，让它冲掉的话「多步工具调用」的轮次会漏发 |
-| `turn/end` | 读一次即归零；不是 QQ 轮 → 记一条日志、**一个字都不发**（fail-closed 默认） |
+| `handleInbound` 注入时 | `pendingFromQQ = true`；**若没有正在跑的轮**再 `currentTurnFromQQ = true`（认领下一轮，不依赖一定观察到 `turn/start`） |
+| `user/message` | 只更新 `pendingFromQQ`：认出是我们注入的 → true；`kind==='user'`（人在 DSH 打字）或别的插件 → false；`tool`/`model`/未知 → **不动**（工具结果也是 `user/message`） |
+| `turn/start` | `turnActive = true`；**`currentTurnFromQQ = pendingFromQQ`** ← 关键：把归属固定在这一轮上 |
+| `turn/end` | 读 `currentTurnFromQQ` 决定发不发；然后消费掉、`turnActive = false`。不是 QQ 轮 → 记日志、**一个字都不发**（fail-closed） |
+
+> **为什么第一版（单一标记）不够** —— 用户要求"复查放行逻辑"时查出来的两个真口子：
+>
+> | 口子 | 场景 | 后果 |
+> |---|---|---|
+> | ① | QQ 那一轮还在跑，DSH 里又打了一句 → 单一标被清 | **同一轮里工具被拒（哑火）** |
+> | ② | DSH 那一轮还在跑，群里来了 QQ 消息 → 单一标被抬 | **DSH 的内容可能被误发进群** |
+>
+> 根因：`turn/start` 的事件负载只有 `{turn: number}`，**没有"这轮是哪条消息触发的"**，
+> 所以"标在中途被改"无从区分。**把「最近一条用户消息的来源」和「当前轮的来源」分开存**
+> 就同时解掉了：轮内再来的消息只改 pending，那一轮的归属在 `turn/start` 就定死了。
+> 测试里 G/H/I 三个用例专门盯这两条（轮内插 DSH 消息不哑火 / DSH 轮内来 QQ 消息不误发 /
+> 多轮延续仍算 QQ 轮）。
 
 **消息来源的形状**（rc.3 类型里核实过）：`MessageSourceMap` =
 `{kind:'user'}` / `{kind:'plugin', plugin}` / `{kind:'model'}` / `{kind:'tool'}`；
-`user/message` 事件的 `data` 是 `{turn, step, message}`（也可能直接是 `UserMessage`，两种都要兜）。
+`turn/start` 只有 `{turn}`；`user/message` 的 `data` **就是** `UserMessage`（也可能被包成
+`{turn,step,message}`，两种都兜）。
 
 > ⚠️ **别只靠 `source` 字段判断「这条消息来自谁」**（真机哑火教训，2026-09-30）：
 > 244 那边报「我确实是用 QQ @ 的」，工具却回「本轮不是 QQ 唤醒的」——

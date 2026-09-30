@@ -793,9 +793,11 @@ export function apply(ctx, config) {
     } catch {
       send()
     }
-    // 这一轮是 QQ 唤醒的 —— 出站闸门要用（见下面的 turnFromQQ）。
-    // 不依赖"观察到自己的 user/message 事件"：注入方自己最清楚。
-    turnFromQQ = true
+    // 这一轮是 QQ 唤醒的 —— 出站闸门要用（见下面的 pendingFromQQ / currentTurnFromQQ）。
+    pendingFromQQ = true
+    // 没有正在跑的轮，就直接认领下一轮（不依赖一定观察到 turn/start）；
+    // 有正在跑的轮，就不能改它 —— 这条消息会自己起一轮，那时候 turn/start 会快照 pendingFromQQ。
+    if (!turnActive) currentTurnFromQQ = true
     // 只移除**确实进了这次摘要**的那些条目（按对象身份），
     // 期间新到的消息要留在缓冲里等下一次唤醒。
     state.buffer = state.buffer.filter((m) => !bufferSnapshot.includes(m))
@@ -1085,26 +1087,26 @@ export function apply(ctx, config) {
   let pendingReply = null
 
   /**
-   * 这一轮到底是不是「QQ 唤醒的那一轮」。
+   * 「这一轮是不是 QQ 唤醒的」——**按轮快照**，三个变量分工。
    *
-   * **为什么必须有它**：注入的用法说明是**常驻**的系统提示 —— 会话发起人在 DSH 界面里
-   * 跟同一个会话聊天时，模型同样看得到「你连着 QQ，回话用标记块」。如果出站不看来源，
-   * DSH 那一轮里出现的标记块也会被发进群，等于把闸门开在了错误的维度上
-   * （用户 2026-09-30 报的正是这个：「agent 分不清是在 QQ 还是 DSH 里」）。
+   * **为什么必须有它**：注入的用法说明是**常驻**系统提示 —— 会话发起人在 DSH 界面里
+   * 跟同一个会话聊天时，模型同样看得到「你连着 QQ，回话用标记块」。出站若不看来源，
+   * DSH 那一轮里的标记块也会被发进群（用户 2026-09-30 报的「agent 分不清是在 QQ 还是 DSH 里」）。
    *
-   * 判据（**三条并用**，因为真机上出现过错判 → 哑火）：
-   *   ① 注入时直接置位（注入方最清楚这一轮是谁叫的）；
-   *   ② `user/message` 被认出是**我们自己灌进去的那条**（见 `isOurInbound`）→ 置位；
-   *   ③ 认不出、且 `source.kind === 'user'`（人在 DSH 里打字）或别的插件注入 → 清除；
-   *   ④ `tool` / `model` / 未知来源 → **不动标记**（工具结果也是 user/message，
-   *      不能让它在同一轮中间把标记冲掉）。
-   * `turn/end` 消费一次即归零；默认 false = 没有 QQ 唤醒就不出站（fail-closed）。
+   * ⚠️ **为什么不是一个标**（复查时发现的两个真口子）：
+   *   - 口子 ①：一轮还在跑时，DSH 里又打了一句 → 单一标被清 → **同一轮里工具被拒（哑火）**；
+   *   - 口子 ②：DSH 那一轮还在跑时，群里来了 QQ 消息 → 单一标被抬 → **DSH 的内容可能发进群**。
+   *   根因：`turn/start` 的事件负载只有 `{turn}`，**没有"这轮是哪条消息触发的"**，
+   *   所以"中途被改"就无从区分。修法：把"最近一条用户消息的来源"和"当前轮的来源"分开存。
    *
-   * ⚠️ 曾经只按 ③ 的 source 判，结果 244 那边出现哑火：用户明明是用 QQ @ 的，
-   * 工具却报「本轮不是 QQ 唤醒的」。**教训：不要用单一字段去推断"这条消息来自谁"，
-   * 那个字段可能被上游重写；要有一个自己能对上的锚（这里是消息 id + 正文前缀）。**
+   * 三个变量：
+   *   - `pendingFromQQ`  最近一条 `user/message` 的来源判断（随时更新，**不影响正在跑的轮**）
+   *   - `currentTurnFromQQ`  当前轮的快照 —— `turn/start` 时从 pending 取，`turn/end` 时消费掉
+   *   - `turnActive`  有没有一轮正在跑（决定注入时能不能直接认领下一轮）
    */
-  let turnFromQQ = false
+  let pendingFromQQ = false
+  let currentTurnFromQQ = false
+  let turnActive = false
 
   /**
    * 最近一次注入的 QQ 消息 id —— 用来**认出**「这条 user/message 就是我们自己灌进去的」。
@@ -1128,13 +1130,14 @@ export function apply(ctx, config) {
 
   /** 最近的 user/message 观测（排障用：哑火时能看到它到底长什么样）。 */
   const inboundProbe = []
-  function noteInboundProbe(msg, kind, plugin, matched) {
+  function noteInboundProbe(msg, kind, plugin, matched, effect) {
     inboundProbe.push({
       at: Date.now(),
       kind,
       plugin: plugin ?? null,
       id: msg?.id ?? null,
       ours: matched,
+      effect,
       text: messageText(msg).slice(0, 60),
     })
     if (inboundProbe.length > 8) inboundProbe.shift()
@@ -1145,16 +1148,26 @@ export function apply(ctx, config) {
     if (!targetId || session?.id !== targetId) return
     const data = event?.data ?? {}
 
+    // 一轮开始：把"当前轮来源"从"最近一条用户消息"快照下来。
+    // 之后中途再来什么消息，都不会改这一轮的判定（这就是两个口子的解药）。
+    if (event.type === 'turn/start') {
+      turnActive = true
+      currentTurnFromQQ = pendingFromQQ
+      return
+    }
+
     if (event.type === 'user/message') {
-      // data 可能是 {turn, step, message}，也可能直接是 UserMessage —— 两种都兜住。
+      // `user/message` 的 data **就是** UserMessage（也可能被包成 {turn,step,message}，两种都兜）。
       const msg = data.message ?? data
       const source = msg?.source ?? {}
       const kind = typeof source.kind === 'string' ? source.kind : 'unknown'
       const mine = isOurInbound(msg)
-      noteInboundProbe(msg, kind, source.plugin, mine)
-      if (mine) turnFromQQ = true
-      else if (kind === 'user') turnFromQQ = false
-      else if (kind === 'plugin') turnFromQQ = source.plugin === PLUGIN_TAG
+      // 只更新 pending：**绝不改正在跑的那一轮**的判定。
+      if (mine) pendingFromQQ = true
+      else if (kind === 'user') pendingFromQQ = false
+      else if (kind === 'plugin') pendingFromQQ = source.plugin === PLUGIN_TAG
+      // tool / model / 未知来源：不动 pending（工具结果也是 user/message）
+      noteInboundProbe(msg, kind, source.plugin, mine, mine ? 'pending=true' : kind === 'user' ? 'pending=false' : 'pending 不变')
       return
     }
 
@@ -1172,13 +1185,15 @@ export function apply(ctx, config) {
       const kind = typeof data.reason?.kind === 'string' ? data.reason.kind : 'unknown'
       const raw = pendingReply
       pendingReply = null
-      const fromQQ = turnFromQQ
-      turnFromQQ = false // 一轮结束就归零；下一轮由它自己的 user/message 重新决定
+      // 消费：这一轮结束，当前轮判定清空，等下一次 turn/start 重新快照。
+      const fromQQ = currentTurnFromQQ
+      currentTurnFromQQ = false
+      turnActive = false
       if (!raw) return
 
       // 闸门的第一道：**只发 QQ 唤醒的那一轮**。DSH 界面里聊出来的标记块一个字都不发。
       if (!fromQQ) {
-        logger.info('本轮不是 QQ 唤醒的（最近一条用户消息不是 QQ 注入），即使有标记块也不出站')
+        logger.info('本轮不是 QQ 唤醒的（这一轮不是由 QQ 注入的消息起的），即使有标记块也不出站')
         return
       }
 
@@ -1289,6 +1304,8 @@ export function apply(ctx, config) {
           recentOutbox: state.outbox.slice(-3),
           // 排障用：最近观测到的 user/message 长什么样（哑火时看这里 —— ours=false 就说明没认出来）
           recentInboundSources: inboundProbe.slice(-5),
+          // 出站闸门的实时状态：currentTurnFromQQ 才是决定"这一轮发不发"的那个
+          gate: { pendingFromQQ, currentTurnFromQQ, turnActive },
           // M3：浏览器半有没有被 web 宿主组合进 boot graph。
           // 界面里看不到卡片时先看这里 —— 最常见的原因是改了 package.json 没重启。
           clientHalf: clientHalfStatus(),
@@ -1374,7 +1391,7 @@ export function apply(ctx, config) {
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
     async execute(args) {
       // 来源闸门：不是 QQ 唤醒的那一轮，一个字都不发，并且**明确告诉模型原因**。
-      if (!turnFromQQ) {
+      if (!currentTurnFromQQ) {
         return JSON.stringify({
           sent: 0,
           refused: true,
