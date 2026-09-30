@@ -243,7 +243,7 @@ export function apply(ctx, config) {
   // ── state (最近聊天缓冲 / 唤醒日志 / 出站采集 / 出站目的地) ──────────────────
 
   const statePath = config.statePath || join(home, 'qq-bridge-state.json')
-  const state = { buffer: [], log: [], outbox: [], lastDestination: null, lastMessageId: null }
+  const state = { buffer: [], log: [], outbox: [], lastDestination: null, lastMessageId: null, listening: null }
   loadState()
 
   function loadState() {
@@ -255,6 +255,7 @@ export function apply(ctx, config) {
       if (Array.isArray(raw?.outbox)) state.outbox = raw.outbox.slice(-MAX_OUTBOX)
       if (raw?.lastDestination && typeof raw.lastDestination === 'object') state.lastDestination = raw.lastDestination
       if (raw?.lastMessageId !== undefined) state.lastMessageId = raw.lastMessageId
+      if (raw?.listening && typeof raw.listening === 'object') state.listening = raw.listening
     } catch (error) {
       logger.warn(`state load failed: ${error?.message ?? error}`)
     }
@@ -303,11 +304,35 @@ export function apply(ctx, config) {
   }
 
   /**
+   * 会话跟随（listening window）：模型自己开的「继续听」窗口。
+   *
+   * 动机：真人聊天不会每句都 @。第一次 @ 之后如果话题还在继续，模型可以开一个窗口，
+   * 让同一目的地接下来的普通消息也唤醒它 —— 也就是「线性聊天不用反复 @」。
+   * 窗口**由模型决定**（`qq_bridge_listen` 工具），到期自动失效。
+   */
+  function destinationKeyOf(msg) {
+    if (msg?.groupId) return `group:${msg.groupId}`
+    if (msg?.userId) return `private:${msg.userId}`
+    return null
+  }
+
+  function listeningActive(msg) {
+    const w = state.listening
+    if (!w?.key || !w?.until) return false
+    if (Date.now() > Number(w.until)) return false
+    const key = destinationKeyOf(msg)
+    return key !== null && key === w.key
+  }
+
+  /**
    * 纯函数式决策，便于测试：返回 {action:'drop'|'wake'|'record', reason}
    * random 注入以便复现。
    */
   function decide(msg, s, random = Math.random) {
     if (!isAllowed(msg, s)) return { action: 'drop', reason: 'not-allowlisted' }
+    // 会话跟随：模型开着窗口时，同一目的地的普通消息也唤醒（放在 @ 闸门**之前**，
+    // 否则群里 atOnlyInGroup 会把线性对话直接掐断）。
+    if (listeningActive(msg)) return { action: 'wake', reason: 'listening' }
     // M2：群里的额外闸门 —— 没被 @ 就完全不处理（比概率唤醒更严）。
     if (msg.groupId && s.atOnlyInGroup && msg.atSelf !== true) return { action: 'drop', reason: 'group-not-at' }
     if (msg.atSelf === true) return { action: 'wake', reason: 'at-mention' }
@@ -347,7 +372,10 @@ export function apply(ctx, config) {
             '你正通过 dsh-qq-bridge 接到 QQ。入站消息形如「[QQ · 群名] 昵称：内容」，' +
             '有时前面会带一段「[QQ 未唤醒期间聊天记录]」摘要；图片会以「[图片N] <描述>」的形式给你。\n' +
             '**要回复到 QQ，只把你希望对 QQ 说出口的内容放进 [QQ]…[/QQ] 里。**' +
-            '没有这个标记块就一个字都不会发出去 —— 所以给自己看的分析、路径、思考过程请写在标记块外面。',
+            '没有这个标记块就一个字都不会发出去 —— 所以给自己看的分析、路径、思考过程请写在标记块外面。\n' +
+            '**会话跟随**：真人聊天不会每句都 @。如果一段对话还会继续，用 `qq_bridge_listen` 工具开一个' +
+            '短窗（默认 5 分钟），期间同一目的地的普通消息也会唤醒你，不必让对方反复 @；' +
+            '话题结束就调 `qq_bridge_listen` 带 `off: true` 关掉（开着窗口时每条消息都会唤醒，会花 token，别无脑常开）。',
         }),
       )
       logger.info(`已向会话 ${agent.id} 注入 QQ 用法说明（scope=${agentCtx ? 'agent' : 'global'}）`)
@@ -1076,6 +1104,7 @@ export function apply(ctx, config) {
           transport: transport.status(),
           visionModel: (await findVisionModel()) ?? '(没找到支持图片输入的模型)',
           lastDestination: state.lastDestination,
+          listening: state.listening,
           bufferedUnwoken: state.buffer.length,
           recentBuffer: state.buffer.slice(-3).map((m) => ({
             who: m.nickname || m.userId || null,
@@ -1354,6 +1383,47 @@ export function apply(ctx, config) {
       } catch (error) {
         return JSON.stringify({ error: error?.message ?? String(error) }, null, 2)
       }
+    },
+  }))
+
+  // ── 会话跟随：模型自己决定「下一轮要不要必然触发」 ──────────────────────────
+  // 不受 debugTools 限制 —— 这是产品的使用方式，不是调试工具。
+  const DEFAULT_LISTEN_MINUTES = 5
+  const MAX_LISTEN_MINUTES = 60
+
+  ctx.tools.register(defineTool({
+    name: 'qq_bridge_listen',
+    description:
+      '开/关「会话跟随」。开启后，在指定分钟数内，**同一个 QQ 目的地（群或私聊）里的普通消息也会唤醒你**，不必每条都 @ 或被叫名字 —— 用于一段连续的对话。觉得话头还会继续就开，想收尾就关。默认 5 分钟，上限 60。',
+    parameters: {
+      minutes: { type: 'number', description: `监听时长（分钟），默认 ${DEFAULT_LISTEN_MINUTES}，上限 ${MAX_LISTEN_MINUTES}。` },
+      off: { type: 'boolean', description: 'true = 立刻关闭监听窗口。' },
+    },
+    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
+    async execute(args) {
+      if (args.off === true) {
+        state.listening = null
+        saveState()
+        pushLog({ kind: 'listen', action: 'off' })
+        return JSON.stringify({ listening: null, note: '会话跟随已关闭' }, null, 2)
+      }
+      if (args.minutes === undefined || args.minutes === null) {
+        return JSON.stringify({ listening: state.listening, now: Date.now() }, null, 2)
+      }
+      const dest = state.lastDestination
+      if (!dest?.kind) {
+        return JSON.stringify({ error: '还没有任何入站目的地（先等一条非丢弃的 QQ 消息）' }, null, 2)
+      }
+      const key = dest.kind === 'group' ? `group:${dest.groupId}` : `private:${dest.userId}`
+      const minutes = Math.max(1, Math.min(MAX_LISTEN_MINUTES, Number(args.minutes) || DEFAULT_LISTEN_MINUTES))
+      state.listening = { key, until: Date.now() + minutes * 60000, setAt: Date.now() }
+      saveState()
+      pushLog({ kind: 'listen', action: 'on', key, minutes })
+      return JSON.stringify(
+        { listening: state.listening, minutes, key, note: `接下来 ${minutes} 分钟，${key} 里的普通消息也会唤醒你` },
+        null,
+        2,
+      )
     },
   }))
 

@@ -51,7 +51,7 @@ function check(label, cond, extra = '') {
 
 apply(ctx, config)
 console.log('registered tools:', registered.map((t) => t.name).join(', '))
-check('apply 未抛错且注册了 5 个工具', registered.length === 5)
+check('apply 未抛错且注册了 6 个工具', registered.length === 6)
 
 const sim = registered.find((t) => t.name === 'qq_bridge_simulate')
 const status = registered.find((t) => t.name === 'qq_bridge_status')
@@ -163,6 +163,38 @@ if (sim) {
     ['face', 'mface', 'image', 'record', 'video', 'file', 'json', 'xml', 'forward', 'poke', 'location', 'music']
       .every((t) => labelForSegment(t, {}) !== ''),
   )
+}
+
+// 会话跟随（listening window）：一次性 @ 之后，线性聊天不再需要反复 @
+{
+  const listen = registered.find((t) => t.name === 'qq_bridge_listen')
+  check('qq_bridge_listen 工具存在', !!listen)
+
+  // 开窗前：普通消息走抽样（概率已被前面压成 0）→ record
+  const before = JSON.parse(await sim.execute({ text: '没有昵称的一句', userId: 'test-user', dryRun: true }))
+  check('开窗前普通消息不唤醒', before.preview.action === 'record', JSON.stringify(before.preview))
+
+  // 开窗（目的地由前面的非 dryRun 调用记为 private:test-user）
+  const opened = JSON.parse(await listen.execute({ minutes: 5 }))
+  check('开窗成功且 key 正确', opened.key === 'private:test-user', JSON.stringify(opened))
+
+  const during = JSON.parse(await sim.execute({ text: '继续聊，没有 @', userId: 'test-user', dryRun: true }))
+  check('窗口内普通消息 → wake(listening)', during.preview.action === 'wake' && during.preview.reason === 'listening', JSON.stringify(during.preview))
+
+  const other = JSON.parse(await sim.execute({ text: '别处来的', userId: 'stranger', dryRun: true }))
+  check('窗口只对本目的地生效（别处仍被白名单挡）', other.preview.reason === 'not-allowlisted', JSON.stringify(other.preview))
+
+  // 关窗
+  await listen.execute({ off: true })
+  const after = JSON.parse(await sim.execute({ text: '关窗之后', userId: 'test-user', dryRun: true }))
+  check('关窗后恢复普通策略', after.preview.reason !== 'listening', JSON.stringify(after.preview))
+
+  // 上限保护
+  const capped = JSON.parse(await listen.execute({ minutes: 9999 }))
+  check('时长被上限截住', capped.minutes === 60, JSON.stringify(capped.minutes))
+  await listen.execute({ off: true })
+  const st = JSON.parse(await status.execute({}))
+  check('status 暴露 listening 字段', 'listening' in st)
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
