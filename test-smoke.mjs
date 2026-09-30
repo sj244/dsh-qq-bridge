@@ -263,6 +263,55 @@ if (sim) {
   }
   check('client/client.js 语法可解析', parses)
 
+  // 真把 bundle 跑一遍：假 window.__ModuleLoader__ + 假 react + 假 ctx。
+  // 比字符串匹配强得多 —— key 写错在真机上是「不报错、界面静默空白」，
+  // 那种失败只有把注册路径真跑一次才拦得住。
+  {
+    let def
+    const sandbox = { window: { __ModuleLoader__: { load: (d) => { def = d } } }, console }
+    vm.runInNewContext(src, sandbox)
+    check('bundle 被 __ModuleLoader__ 装载', def?.id === pkg.name, String(def?.id))
+
+    const fakeReact = {
+      createElement: (...args) => ({ args }),
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useState: () => [null, () => {}],
+      useEffect: () => {},
+      useSyncExternalStore: () => undefined,
+    }
+    const mod = def.factory((name) => {
+      if (name === 'react') return fakeReact
+      throw new Error(`require 了非 baseline 模块：${name}`)
+    })
+    check(
+      '浏览器半导出 apply / inject / name',
+      typeof mod.apply === 'function' && Array.isArray(mod.inject) && mod.name === pkg.name,
+    )
+
+    const cards = []
+    const fakeCtx = {
+      get: () => undefined,
+      inject: (_deps, cb) => cb(fakeCtx),
+      settingsScope: { bind: () => ({}) },
+      slots: {
+        inject: (_name, cb) => cb(),
+        register: (options, cell) => {
+          cards.push({ options, cell })
+          return () => {}
+        },
+      },
+    }
+    mod.apply(fakeCtx)
+    check('apply 注册了一张卡片', cards.length === 1, String(cards.length))
+    check(
+      '卡片 name / key 正确（key 必须等于宿主 settings 命名空间）',
+      cards[0]?.options?.name === 'settings.plugin.item' && cards[0]?.options?.key === NS,
+      JSON.stringify(cards[0]?.options),
+    )
+    check('卡片渲染函数可调用', typeof cards[0]?.cell === 'function' && Boolean(cards[0].cell()))
+  }
+
   // status 要能回答「浏览器半到底装上没有」—— 界面里不显示时全靠这一条排障
   const st = JSON.parse(await status.execute({}))
   check('qq_bridge_status 报告浏览器半状态', st.clientHalf && typeof st.clientHalf === 'object', JSON.stringify(st.clientHalf))

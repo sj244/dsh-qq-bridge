@@ -704,8 +704,11 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 `dsh-client-modules` 在**启动时扫描启用的 loader 条目**，把每个带 `dsh.client` 的包变成一份挂在
 `/plugins` 下的 bundle，浏览器按需懒加载 —— **不需要重新构建 web 前端**。
 
-> ⚠️ **两步都得做，少一步就是看不到卡片**（真机上完整踩过一遍）：
-> 1. **重启 `dsh web`** —— boot graph 在启动时组合，只改 `package.json` 不重启等于没改；
+> ⚠️ **两步都得做，少一步就是看不到改动**（真机上完整踩过一遍）：
+> 1. **重启 `dsh web`** —— boot graph 在启动时组合；而且 `client/` 里的**内容**也是启动时读一次、
+>    算好指纹（rev）随 URL 下发的。`clientModules.rebuilt()` 的注释写得很明白：
+>    那是「bundle 内容变化到达 boot graph 的**唯一**入口」，而它挂在 HMR 监听器上 ——
+>    没开 dev watcher 的部署，**改浏览器半的代码必须重启服务器**它才会重新读盘。
 > 2. **刷新浏览器页面（F5）** —— boot graph 是**页面加载时**注入的（`window.__DSH_BOOT__`）。
 >    重启服务器只会让已经打开的页面断线重连，它手里仍是旧的那份清单，**压根不知道新 bundle 存在**。
 >
@@ -742,6 +745,7 @@ window.__ModuleLoader__.load({
 | 写一项 | `await scope.set(field, value)`，值是 JSON 形状；写的是**用户层**，即时生效 |
 | 恢复默认 | `scope.unset(field)`；`snapshot.user` 里**存在该字段**即「已被覆盖」 |
 | 注册卡片 | `ctx.slots.register({ name: 'settings.plugin.item', key: 'qq-bridge' }, Cell)` |
+| 会话下拉的数据源 | `ctx.sessions.list`（`ObservableSnapshot<SessionListState>`：`ids[]` + `byId[id].displayTitle`），另有 `ctx.sessions.refresh()` |
 
 > ⚠️ **最容易踩的一条**：卡片 `key` 必须**逐字等于**宿主注册的 settings 命名空间。
 > 不一致不会报错，界面上就是静默什么都不出现。`test-smoke.mjs` 有断言盯着这个一致性

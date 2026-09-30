@@ -37,8 +37,8 @@ window.__ModuleLoader__.load({
       {
         key: 'targetSessionId',
         label: '目标会话',
-        kind: 'text',
-        hint: '固定跟哪个会话说话（session-…）。留空 = 不驱动任何会话。',
+        kind: 'session',
+        hint: '要接管哪个会话 —— 按名字选就行，不用记 id。',
       },
       {
         key: 'nicknames',
@@ -132,6 +132,32 @@ window.__ModuleLoader__.load({
       return JSON.stringify(a) === JSON.stringify(b)
     }
 
+    /**
+     * 会话下拉的选项：真实的会话列表 + 「不驱动」+ 一个兜底项。
+     *
+     * 兜底项是必要的：配置里那个 id 可能**不在**当前列表里（别的工作区、已被归档、
+     * 或者宿主还没加载完）。直接把它丢掉的话，用户一保存就把配置清空了。
+     */
+    function sessionOptions(state, current) {
+      const out = [{ value: '', label: '（不驱动任何会话）' }]
+      const ids = Array.isArray(state?.ids) ? state.ids : []
+      const byId = state && typeof state.byId === 'object' && state.byId ? state.byId : {}
+      const seen = new Set([''])
+      for (const id of ids) {
+        const key = String(id)
+        seen.add(key)
+        const row = byId[id] ?? {}
+        const title = typeof row.displayTitle === 'string' && row.displayTitle !== '' ? row.displayTitle : key
+        out.push({ value: key, label: row.running ? `${title}（运行中）` : title })
+      }
+      const cur = String(current ?? '')
+      if (cur !== '' && !seen.has(cur)) out.push({ value: cur, label: `${cur}（不在会话列表里）` })
+      return out
+    }
+
+    /** 没有 sessions 服务（或它还没就绪）时用的稳定空快照 —— 必须稳定，否则 useSyncExternalStore 会死循环。 */
+    const EMPTY_SESSION_LIST = { ids: [], byId: {} }
+
     // ── 样式（内联，跟随主题文字色） ──────────────────────────────────────────
     const BORDER = '1px solid rgba(127,127,127,0.35)'
     const S = {
@@ -192,6 +218,23 @@ window.__ModuleLoader__.load({
       const shown = draft ?? current
       const dirty = draft !== null && !same(draft, current)
       const user = snap.user && typeof snap.user === 'object' ? snap.user : {}
+
+      // ── 目标会话的下拉数据源 ──────────────────────────────────────────────
+      // ctx.sessions.list 是客户端 SDK 暴露的会话列表快照（ObservableSnapshot）。
+      // 取不到（这个部署没装 sessions 服务、或它还没就绪）就退回「只有兜底项」，
+      // 卡片本身照常渲染 —— 宁可少一个下拉，也不要整张卡片消失。
+      const sessions = props.sessionsOf ? props.sessionsOf() : undefined
+      const listStore = sessions && sessions.list && typeof sessions.list.getSnapshot === 'function' ? sessions.list : undefined
+      const listSubscribe = react.useCallback((cb) => (listStore ? listStore.subscribe(cb) : () => {}), [listStore])
+      const listGetSnapshot = react.useCallback(
+        () => (listStore ? listStore.getSnapshot() : EMPTY_SESSION_LIST),
+        [listStore],
+      )
+      const sessionList = react.useSyncExternalStore(listSubscribe, listGetSnapshot)
+      react.useEffect(() => {
+        // 进卡片时拉一次，免得显示的是很久以前的标题
+        if (sessions && typeof sessions.refresh === 'function') Promise.resolve(sessions.refresh()).catch(() => {})
+      }, [sessions])
 
       function change(key) {
         return (event) => {
@@ -264,6 +307,12 @@ window.__ModuleLoader__.load({
             { style: S.input, value: String(value), disabled: !snap.writable || busy, onChange: change(f.key) },
             (f.options || []).map(([v, text]) => h('option', { key: v, value: v }, text)),
           )
+        } else if (f.kind === 'session') {
+          control = h(
+            'select',
+            { style: S.input, value: String(value), disabled: !snap.writable || busy, onChange: change(f.key) },
+            sessionOptions(sessionList, value).map((o) => h('option', { key: o.value || '(none)', value: o.value }, o.label)),
+          )
         } else {
           control = h('input', {
             type: f.kind === 'number' ? 'number' : 'text',
@@ -281,7 +330,14 @@ window.__ModuleLoader__.load({
             'div',
             { key: `${f.key}-ctl` },
             control,
-            f.kind !== 'boolean' && f.hint ? h('div', { style: S.hint }, f.hint) : null,
+            f.kind !== 'boolean' && f.hint
+              ? h(
+                  'div',
+                  { style: S.hint },
+                  // 会话下拉额外把真实 id 显示出来：看着名字选，但真要手抄/核对时 id 就在旁边
+                  f.kind === 'session' && String(value) !== '' ? `${f.hint}当前：${value}` : f.hint,
+                )
+              : null,
           ),
         )
       }
@@ -350,7 +406,10 @@ window.__ModuleLoader__.load({
               key: NS,
               // 卡片按 settings 命名空间派发：key 不对 = 界面上什么都不出现。
             },
-            () => h(Card, { scope }),
+            // sessionsOf 用「取的时候再解析」而不是现在取一次：
+            // sessions 服务可能比本插件晚出现，也可能这个部署根本没装 —— 那时卡片照常渲染，
+            // 只是目标会话那一栏只有一个兜底项，而不是整张卡片消失。
+            () => h(Card, { scope, sessionsOf: () => ctx.get('sessions') }),
           ),
         )
       })
