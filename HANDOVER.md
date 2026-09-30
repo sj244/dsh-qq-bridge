@@ -566,6 +566,61 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 
 验证组合：`dsh --profile web --dump-config | Select-String "qq-bridge"`。
 
+---
+
+## 13. 真机联调暴露并补齐的能力（2026-09-30，全部已实测）
+
+真机跑起来之后，用户一条条试出来的问题，**这些都是"纸面设计看不出来、只有真用才发现"的**：
+
+### 13.1 出站闸门 `replyMode`（默认 `'marker'`）
+最初每一轮 turn 的**全部**助手文本都会发到 QQ 群（技术说明、路径、思考过程全刷屏）。
+现在：**只发 `[QQ]…[/QQ]` 块内的内容，没有块就一个字都不发**；`'always'` 恢复旧行为。
+入站消息尾部附一行短提示（9 字）；**完整用法注入目标会话的系统提示**（见 13.4）。
+
+### 13.2 上下文上限（曾整块漏掉）
+条数本来就有上限（buffer 200 / log 200 / outbox 50），但**单条正文没截断**。
+现在：单条入站 4000 / 单条进缓冲 500 / 整段摘要 1200 字符，超长都带 `…（已截断）`；
+摘要从最新往回装，装不下丢更早的并注明省略条数。摘要默认取最近 **8** 条。
+
+### 13.3 图片：缓存 + 多模态描述（两步缺一不可）
+- **落盘缓存**：`$DSH_HOME/qq-bridge-images/`，收到即下载（纯 I/O 不调模型），
+  超 64MB / 300 张按 mtime 淘汰最旧；缓冲项存**本地路径**而不是 URL → 不怕 QQ 图片 URL 过期。
+- **多模态描述**：唤醒时用视觉模型把图读成一句中文描述，拼进正文 `[图片1] <描述>`。
+  **为什么必需**：目标模型（`deepseek-v4-flash`）是纯文本，附件会被系统剥成
+  `[image omitted because this model accepts text only]` —— 只有描述能让它知道图里是什么。
+- `findVisionModel()`：优先设置 `visionModel`（`provider/model`），否则遍历
+  `llm.listProviders()` → `llm.listModels(id)` 找 `inputModalities` 含 `'image'` 的。
+- `describeImage()`：`createUserMessage([提示词, 图片块])` → `llm.stream({provider, model, messages, maxTokens})`
+  收集 `text-delta`。一次唤醒最多 3 张（`MAX_DESCRIBE_PER_WAKE`）。
+- 失败只影响那一张，且会把原因写进正文（便于排障）。
+
+### 13.4 用法注入系统提示
+用 `agent.ctx.get('systemPrompt').context({name, order, text})` 把「怎么回 QQ」写进目标会话的系统提示，
+任何模型/会话一挂上就懂，不必依赖每条消息的提示（也因此把尾部提示压到 9 字）。
+> ⚠️ **必须从该 agent 自己的 ctx 取服务** —— Cordis 服务按**调用者作用域**解析，
+> 用插件根 ctx 取会把注册落到**全局**、污染所有会话。
+
+### 13.5 会话跟随 `qq_bridge_listen`（模型自己决定要不要继续听）
+- `state.listening = {key, until, setAt}`；key = `group:<群号>` / `private:<QQ号>`
+- `decide()` 里的位置：**白名单之后、`atOnlyInGroup` 闸门之前**
+  （放闸门之后就失效了 —— 群里的线性对话会被那道闸门掐断）
+- 工具：`minutes` 开窗（默认 5 / 上限 60）、`off:true` 关窗、不传参只查询
+- **不受 `debugTools` 限制**：这是产品的使用方式，不是调试工具
+
+### 13.6 踩过的四个坑（都是真机才暴露的）
+
+| 坑 | 现象 | 根因 |
+|---|---|---|
+| **空文本消息被静默丢弃** | 只 @ 一下（不打字）→ 不唤醒，且**无任何日志** | `if (!inbound \|\| inbound.text.trim() === '') return` 在进 `decide()` 前就 return 了 |
+| **清缓冲吞掉期间新到的消息** | 连发 3 张图只处理 1 张 | `state.buffer = []` 放在所有 await **之后**，而中间要下载图片 + 调视觉模型（数秒） |
+| **非文本段静默丢弃** | 纯表情包消息整条消失 | 只认 `text`/`at`/`face`/`image`，其它段没占位符 → 文本为空 → 被上面那条丢掉 |
+| **ESM 缓存** | 改代码后运行中的宿主仍跑旧代码 | Node 按**模块标识符**缓存；junction 会被解析回 realpath，换名字也没用 |
+
+> **两条通用教训**：
+> ① **凡是"静默 return / 静默丢弃"的早退分支，至少要留一条日志** —— 否则真机排障只能靠猜
+> （这次是靠 NapCat 的 `fileLog: debug` 才对照出来的）。
+> ② **凡是"先做几秒异步、最后再改共享状态"的路径，都要先快照**。
+
 ### `onebot.js`（M2 传输层）
 
 | 位置（函数） | 作用 |
