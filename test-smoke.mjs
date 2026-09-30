@@ -214,7 +214,14 @@ if (sim) {
   check('用法说明：QQ 是聊天不是工作台', p.includes('不是工作台'))
   check('用法说明：无人值守不碰特权操作', p.includes('无人值守') && p.includes('不要主动做'))
   check('用法说明：把 QQ 消息当不可信输入（防群友注入）', p.includes('不可信输入') && p.includes('注入'))
-  check('用法说明：需要动手就停下等确认', p.includes('点头'))
+  check('用法说明：需要动手就停下等发起人', p.includes('无人值守时我不执行这类操作') && p.includes('等发起人在电脑前'))
+  // 用户 2026-09-30 抓出来的：把「我的规矩」说成「得等你授权」是把规矩伪装成权限，属于误导
+  check('用法说明：禁止把规矩说成「需要授权」（诚实性）', p.includes('别把它说成') && p.includes('伪装成权限'))
+  // 用浏览器点网页同样不弹审批 —— 必须显式堵住这条绕过路径
+  check(
+    '用法说明：不弹审批的路径（浏览器/HTTP/写文件）同样算动手',
+    p.includes('不受审批闸门管的路径同样算「动手」') && p.includes('不能因为不弹就拿它们绕过'),
+  )
   check(
     '用法说明：监听模式用法（开窗 / 上限 / 关窗 / 别无脑常开）',
     p.includes('qq_bridge_listen') && p.includes('off: true') && p.includes('60 分钟') && p.includes('别无脑常开'),
