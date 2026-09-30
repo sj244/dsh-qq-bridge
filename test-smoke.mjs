@@ -22,6 +22,9 @@ const registeredSettings = []
 const handlers = {}
 // 默认没有 agent；「端到端时序」那条用例会临时塞一个假 agent 进来
 let fakeAgent = null
+// 恢复会话那条用例会塞这两个：假 sessionQuery + 捕获 resume 收到的参数
+let fakeSessionQuery = null
+let lastResumeOptions = null
 const ctx = {
   logger: { info() {}, warn: (m) => warnings.push(String(m)) },
   settings: {
@@ -31,7 +34,8 @@ const ctx = {
   agents: {
     get: (id) => (fakeAgent && fakeAgent.id === id ? fakeAgent : undefined),
     roots: () => [],
-    resume: async () => {
+    resume: async (opts) => {
+      lastResumeOptions = opts
       throw new Error('smoke: no agent factory')
     },
   },
@@ -41,7 +45,7 @@ const ctx = {
     return () => {}
   },
   effect: () => {},
-  get: () => undefined,
+  get: (name) => (name === 'sessionQuery' ? fakeSessionQuery : undefined),
 }
 
 const config = {
@@ -561,6 +565,42 @@ if (sim) {
   const want = ['targetSessionId', 'nicknames', 'wakeProbability', 'whitelist', 'groupWhitelist', 'replyMode', 'visionModel']
   const absent = want.filter((k) => !keys.includes(k))
   check('关键键都在 Schema 里（界面上改得到）', absent.length === 0, absent.join(', '))
+}
+
+// ★ 恢复**没开着的**会话时必须带上模型 —— 否则 {{model}} 无值，整轮提示词组装会抛错。
+//   （2026-09-30 真机：244 不在 GUI 里开着的时候，插件一唤醒它就 `prompt variable "{{model}}"
+//    has no value for this assembly (section "deployment.persona-prefix")`。）
+{
+  let asked = 0
+  fakeSessionQuery = {
+    observeSession: async () => {
+      asked++
+      return {
+        events: [{ type: 'request/header', data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } } }],
+        dispose() {},
+      }
+    },
+  }
+  lastResumeOptions = null
+  fakeAgent = null
+  // 这里注入会走到 resume，而假 ctx 的 resume 故意抛错（模拟"没有 agent 工厂"）——
+  // 我们要的是**它拿到了什么参数**，所以把异常接住即可。
+  try {
+    await sim.execute({ text: '244 在吗', userId: 'test-user' })
+  } catch {
+    /* 预期：resume 抛 'smoke: no agent factory' */
+  }
+  check(
+    '恢复会话前会去读该会话的模型',
+    asked === 1 && lastResumeOptions?.resumeSessionId === 'session-smoke',
+    JSON.stringify({ asked, resumeSessionId: lastResumeOptions?.resumeSessionId }),
+  )
+  check(
+    '恢复会话时带上了模型（避免 {{model}} 无值炸掉）',
+    lastResumeOptions?.agentOptions?.provider === 'deepseek-official' && lastResumeOptions?.agentOptions?.model === 'deepseek-v4-flash',
+    JSON.stringify(lastResumeOptions?.agentOptions ?? null),
+  )
+  fakeSessionQuery = null
 }
 
 // M3：浏览器半 —— 设置页 → 插件 → 插件配置 里的那张卡片

@@ -408,6 +408,78 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 恢复一个**没开着的**会话时，必须把"这个会话原本用的模型"补上。
+   *
+   * ⚠️ 不补会炸（2026-09-30 真机踩到）：
+   * `dsh-agent-loop` 是这么注册提示词变量的 ——
+   *   `ctx.systemPrompt.variable("model", (context) => context.agent?.options.model)`
+   * 而 `dsh-system-prompt` 的 `interpolate()` 对"变量存在但值是 undefined"是**抛错**的。
+   * 于是只要部署里有任何一节含 `{{model}}`（本项目实测是 `deployment.persona-prefix`），
+   * 用 `agents.resume({resumeSessionId})` 建出来的 agent（`options.model` 为 undefined）
+   * **每一轮都会在组装提示词时失败**。目标会话在 GUI 里开着时不会走这条路，所以以前没暴露。
+   *
+   * 取值优先级**照抄官方 GUI**（`dsh-api-session-controller` 的 `selectionFor`）：
+   *   ① 会话持久化的 `modelSelection` 投影（pending）
+   *   ② 日志里最后一次 `request/header` 的 `config`
+   *   ③ 部署默认模型 `ctx.agentDefaultModel.currentSelection()`
+   * 全都没有就返回 undefined —— 那时**保持旧行为但明确警告**，不假装没事。
+   */
+  async function resolveResumeAgentOptions(id) {
+    // ① 投影 / ② 日志：都从一次 observeSession 里拿
+    try {
+      const q = ctx.get('sessionQuery')
+      if (q && typeof q.observeSession === 'function') {
+        const obs = await q.observeSession(id, { projectionMode: 'all' })
+        try {
+          const proj = obs?.projections
+          const pending =
+            proj?.['modelSelection']?.pending ??
+            (typeof proj?.get === 'function' ? proj.get('modelSelection')?.pending : undefined)
+          if (pending?.provider && pending?.model) {
+            return {
+              provider: pending.provider,
+              model: pending.model,
+              ...(pending.reasoningEffort ? { reasoningEffort: pending.reasoningEffort } : {}),
+            }
+          }
+          const events = Array.isArray(obs?.events) ? obs.events : []
+          for (let i = events.length - 1; i >= 0; i--) {
+            const e = events[i]
+            if (e?.type !== 'request/header') continue
+            const cfg = e.data?.header?.config
+            if (cfg?.provider && cfg?.model) {
+              return {
+                provider: cfg.provider,
+                model: cfg.model,
+                ...(cfg.reasoningEffort ? { reasoningEffort: cfg.reasoningEffort } : {}),
+              }
+            }
+          }
+        } finally {
+          if (obs && typeof obs.dispose === 'function') obs.dispose()
+        }
+      }
+    } catch (error) {
+      logger.warn(`读取会话模型失败（会退回部署默认）：${error?.message ?? error}`)
+    }
+
+    // ③ 部署默认
+    try {
+      const fallback = ctx.get('agentDefaultModel')
+      const sel = typeof fallback?.currentSelection === 'function' ? fallback.currentSelection() : undefined
+      if (sel?.provider && sel?.model) return { provider: sel.provider, model: sel.model }
+    } catch (error) {
+      logger.warn(`读取部署默认模型失败：${error?.message ?? error}`)
+    }
+
+    logger.warn(
+      `恢复会话 ${id} 时拿不到模型（投影/日志/部署默认都没有）。` +
+        '若这个部署的提示词里有 {{model}}，这一轮组装会失败 —— 请把该会话在 GUI 里打开一次，或配置默认模型。',
+    )
+    return undefined
+  }
+
   async function ensureTargetAgent() {
     const s = readSettings()
     const id = s.targetSessionId
@@ -423,8 +495,11 @@ export function apply(ctx, config) {
     if (held) return held.agent
 
     // 显式 resume：这是与 dsh-cron 的关键差异 —— 目标会话没开着也能被唤醒。
+    // ⚠️ 必须带 agentOptions（模型）—— 否则提示词里的 {{model}} 没值，整轮组装失败。
+    const agentOptions = await resolveResumeAgentOptions(id)
     const handle = await ctx.agents.resume({
       resumeSessionId: id,
+      ...(agentOptions ? { agentOptions } : {}),
       ...(config.agentPreset ? { setup: mountPreset } : {}),
     })
     handles.set(id, handle)
