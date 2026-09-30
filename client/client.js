@@ -247,6 +247,21 @@ window.__ModuleLoader__.load({
         fontSize: '13px',
       },
       primary: { background: 'rgba(127,127,127,0.18)', fontWeight: 600 },
+      header: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        width: '100%',
+        padding: '8px 10px',
+        borderRadius: '6px',
+        border: BORDER,
+        background: 'transparent',
+        color: 'inherit',
+        cursor: 'pointer',
+        font: 'inherit',
+        textAlign: 'left',
+      },
+      chevron: { marginLeft: 'auto', opacity: 0.6 },
       note: { fontSize: '12px', opacity: 0.7 },
       err: { fontSize: '12px', color: '#e5534b' },
       overridden: { fontSize: '11px', opacity: 0.5, marginLeft: '4px' },
@@ -268,6 +283,8 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = react.useState(false)
       const [error, setError] = react.useState('')
       const [note, setNote] = react.useState('')
+      // 折叠块：跟官方那几张卡片一致 —— 默认收起
+      const [open, setOpen] = react.useState(false)
 
       const current = react.useMemo(() => draftFrom(snap.value), [snap.value])
       const shown = draft ?? current
@@ -417,19 +434,19 @@ window.__ModuleLoader__.load({
         )
       }
 
+      const header = h(
+        'button',
+        { type: 'button', onClick: () => setOpen(!open), 'aria-expanded': open, style: S.header },
+        h('span', { style: S.title }, 'QQ 桥接'),
+        h('span', { style: S.sub }, dirty ? '有未保存的改动' : '把固定的 DSH 会话接到 QQ'),
+        h('span', { style: S.chevron }, open ? '▴' : '▾'),
+      )
+      // 默认收起：和官方那几张卡片一样，点标题才展开，免得一屏全是表单
+      if (!open) return h('div', { style: S.wrap }, header)
       return h(
         'div',
         { style: S.wrap },
-        h(
-          'div',
-          { style: S.head },
-          h('div', { style: S.title }, 'QQ 桥接'),
-          h(
-            'div',
-            { style: S.sub },
-            '把固定的 DSH 会话接到 QQ。改动即时生效（写进 settings.yaml 的用户层），不用重启。',
-          ),
-        ),
+        header,
         h('div', { style: S.grid }, rows),
         h(
           'div',
