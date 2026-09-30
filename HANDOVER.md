@@ -52,7 +52,8 @@
 | `onebot.js` | ~12 KB | **M2 传输层**：内置 WebSocket 连接管理、退避重连、心跳看门狗、action/echo 收发 |
 | `napcat.js` | ~14 KB | **M5 托管层**：GitHub 发行查询、sha256 校验下载、纯 Node ZIP 解包、OneBot 配置读写、QQ 检测 |
 | `cordis.patch.yml` | ~3.5 KB | bundle 挂载声明 + 安装期默认配置（composition base，含 M2/M5 键） |
-| `package.json` | ~0.9 KB | 包声明：`name=dsh-qq-bridge`、`type=module`、`dsh.bundle.patch` |
+| `client\client.js` | ~13 KB | **M3 浏览器半**：设置页里那张「QQ 桥接」卡片（手写 `__ModuleLoader__` bundle，见 §15） |
+| `package.json` | ~1.3 KB | 包声明：`name=dsh-qq-bridge`、`type=module`、`dsh.bundle.patch`、**`dsh.client`** |
 | `DESIGN.md` | ~12 KB | 设计草案：与现有 QQ 插件的区别、唤醒策略、接口表、设置项、里程碑、安全注意 |
 | `README.md` | ~9 KB | 安装/使用说明，含 OneBot 接入、access_token 配置、NapCat 一键托管、依赖解析坑与解法 |
 | `test-smoke.mjs` | ~5 KB | **离线冒烟测试**（假 ctx 直接调 `apply()`，覆盖策略分支与工具注册） |
@@ -672,6 +673,61 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 > 如果将来真要桥接，最低限度是：只认白名单**私聊**（群里一律不接受审批）、有超时默认拒绝、
 > 审批请求里能看清「到底要执行什么」、拒绝后不得重试。
 > **别为了"无人值守也能干活"削弱这条边界。**
+
+## 15. 浏览器半：设置界面里的那张卡片（M3）
+
+**为什么必须做它**：DSH 的「设置 → 插件 → 插件配置」是**按设置命名空间派发卡片**的 ——
+它把「宿主注册了哪些命名空间」与「哪些卡片声明了这些 key」取交集。
+宿主半注册了 `qq-bridge` 命名空间，但没有浏览器半 → **交集为空 → 界面上什么都不出现**。
+（实测确认：用户截图里确实没有 qq-bridge 一栏。）
+
+**怎么做的**：给包加 `client/client.js`，并在 `package.json` 里声明：
+
+```json
+"dsh": { "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-settings"] } },
+"exports": { "./client": "./client/client.js" }
+```
+
+`dsh-client-modules` 在**启动时扫描启用的 loader 条目**，把每个带 `dsh.client` 的包变成一份挂在
+`/plugins` 下的 bundle，浏览器按需懒加载 —— **不需要重新构建 web 前端**；
+但**改了 `package.json` 必须重启 `dsh web`**（boot graph 在启动时组合）。
+> 旁证：第三方插件 `dshmarket` 就活在这个部署里（`Slots` inspect 能看到它的卡片占着
+> `settings.plugin.item` 的 `dsh-market` key），说明仓库外的浏览器半确实会被加载。
+
+**bundle 格式是手写的**：官方文档明说本仓库之外没有可用的 client 打包预设
+（`packages/client/tsdown.client.ts` 不发布），外部插件得自己复刻产物格式。格式本身很简单：
+
+```js
+window.__ModuleLoader__.load({
+  id: '<包名>',                    // 必须逐字等于包名，浏览器按它取 bundle
+  factory: (require) => {          // require 只能取模块表里的 baseline 依赖
+    var module = { exports: {} }; var exports = module.exports
+    const react = require('react') // react 是 baseline，不用声明 external
+    exports.apply = apply          // 就是个普通 Cordis 插件：apply(ctx) + inject
+    exports.inject = inject
+    return module.exports
+  },
+})
+```
+
+参考实现：`~/.dsh/profiles/web/node_modules/dshmarket/client/client.js`（同仓库外 + 同手搓格式）。
+
+**卡片侧用到的 API**（都已在 rc.3 的产物里核实）：
+
+| 用途 | 用法 |
+|---|---|
+| 绑定命名空间 | `ctx.settingsScope.bind({ namespace: 'qq-bridge' })` |
+| 订阅（配 `useSyncExternalStore`） | `scope.subscribe(cb)` + `scope.getSnapshot()`（快照引用稳定到下次变化） |
+| 写一项 | `await scope.set(field, value)`，值是 JSON 形状；写的是**用户层**，即时生效 |
+| 恢复默认 | `scope.unset(field)`；`snapshot.user` 里**存在该字段**即「已被覆盖」 |
+| 注册卡片 | `ctx.slots.register({ name: 'settings.plugin.item', key: 'qq-bridge' }, Cell)` |
+
+> ⚠️ **最容易踩的一条**：卡片 `key` 必须**逐字等于**宿主注册的 settings 命名空间。
+> 不一致不会报错，界面上就是静默什么都不出现。`test-smoke.mjs` 有断言盯着这个一致性
+> （从 `index.js` 导入 `NS`，与 `client/client.js` 里的 `const NS = 'qq-bridge'` 对照）。
+
+> 卡片 UI 刻意用**原生 HTML + 内联样式**，不依赖 `@deepseek-ai/dsh-client-ui-primitives`：
+> 少一个会跨版本变的依赖；样式跟随主题文字色，深浅色都能看。以后想换官方组件再说。
 
 ### `onebot.js`（M2 传输层）
 

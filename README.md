@@ -193,6 +193,16 @@ QQ 的表情、表情包、图片、语音、视频、文件、卡片、合并�
 - 一次唤醒最多描述 3 张（每张 = 一次多模态调用）
 - 描述失败会带上具体原因，且不影响文本与策略判定
 
+## 设置界面（M3）
+
+**设置 → 插件 → 插件配置** 里会有一张 **QQ 桥接** 的卡片：昵称、私聊/群白名单、唤醒概率、
+目标会话、出站闸门、OneBot 地址都在上面改，**保存即生效**（写进 `settings.yaml` 的用户层，不用重启）。
+
+> 那一栏里没有这张卡片时先确认两件事：① `package.json` 里的 `dsh.client` 还在；
+> ② **重启过 `dsh web`**（浏览器半的清单在启动时组合，热改 `package.json` 不生效）。
+> 卡片按 settings 命名空间派发，`client/client.js` 里的 key 必须逐字等于 `qq-bridge`，
+> 对不上不会报错、只是静默不显示（`test-smoke.mjs` 有断言盯着这个一致性）。
+
 ## 设置项（settings 命名空间 `qq-bridge`）
 
 这些键都能在 **DSH 设置界面**里直接改（设置页里的 `qq-bridge` 一节，改动即时生效）；
@@ -268,7 +278,8 @@ node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / �
 
 - **M1** ✅ 固定会话注入 / 显式 resume / 唤醒策略 / 出站采集 / 调试工具
 - **M2** ✅ OneBot(NapCat) 传输：WS 入站 → `handleInbound()`；出站 `sendToQQ()` → `send_private_msg` / `send_group_msg`
-- **M3** ⏳ 设置界面（昵称 chips / 白名单 / 概率滑块 / 目标会话选择 / 唤醒日志）
+- **M3** ✅ 设置界面：`设置 → 插件 → 插件配置` 里的「QQ 桥接」卡片（浏览器半 `client/client.js`，
+  手写 `__ModuleLoader__` bundle，不依赖构建步骤）
 - **M4** ✅ 打成 DSH bundle，`dsh plugin add` 安装、重启、实测通过
 - **M5** ✅ NapCat 自助托管（下载 / sha256 校验 / 解包 / 写配置 / 启停）；
   ⚠️ 未对真实 NapCat 跑通全流程（安装器与 QQ 登录是交互式的，需要人在场）

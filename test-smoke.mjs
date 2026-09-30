@@ -2,8 +2,10 @@
 //  (1) apply 不抛错、注册了 2 个调试工具；
 //  (2) 唤醒策略三条分支（白名单外丢弃 / 昵称必唤醒 / 其余按概率）；
 // 运行：node test-smoke.mjs
-import { existsSync, rmSync } from 'node:fs'
-import { apply, buildUsagePrompt, extractQQReply, labelForSegment, truncateText } from './index.js'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
+import { apply, buildUsagePrompt, extractQQReply, labelForSegment, NS, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -233,6 +235,31 @@ if (sim) {
   const want = ['targetSessionId', 'nicknames', 'wakeProbability', 'whitelist', 'groupWhitelist', 'replyMode', 'visionModel']
   const absent = want.filter((k) => !keys.includes(k))
   check('关键键都在 Schema 里（界面上改得到）', absent.length === 0, absent.join(', '))
+}
+
+// M3：浏览器半 —— 设置页 → 插件 → 插件配置 里的那张卡片
+{
+  const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf8'))
+  check('package.json 声明了 dsh.client（platform: web）', pkg?.dsh?.client?.platform === 'web', JSON.stringify(pkg?.dsh?.client))
+  check('声明了 ./client 导出', pkg?.exports?.['./client'] === './client/client.js', String(pkg?.exports?.['./client']))
+
+  const clientPath = fileURLToPath(new URL('./client/client.js', import.meta.url))
+  check('client/client.js 存在', existsSync(clientPath))
+  const src = existsSync(clientPath) ? readFileSync(clientPath, 'utf8') : ''
+  check('bundle 用 __ModuleLoader__.load 包装', src.includes('window.__ModuleLoader__.load'))
+  check('模块 id 与包名一致（否则浏览器取不到这个 bundle）', src.includes(`id: '${pkg.name}'`))
+  // 卡片按 settings 命名空间派发：key 与宿主注册的 NS 不一致 = 界面上静默什么都不出现
+  check('卡片 key 与宿主 settings 命名空间一致', src.includes(`const NS = '${NS}'`) && src.includes('key: NS'))
+  check('注册进 settings.plugin.item', src.includes("'settings.plugin.item'"))
+  let parses = false
+  try {
+    new vm.Script(src)
+    parses = true
+  } catch (e) {
+    parses = false
+    console.log('  client 语法错误：', String(e.message))
+  }
+  check('client/client.js 语法可解析', parses)
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)

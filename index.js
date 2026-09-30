@@ -42,7 +42,8 @@ export const name = 'qq-bridge'
 
 export const inject = ['agents', 'tools', 'settings']
 
-const NS = 'qq-bridge'
+// 导出是为了让测试能断言「浏览器半的卡片 key」与它一致 —— 不一致的话界面上会静默什么都不出现。
+export const NS = 'qq-bridge'
 const PLUGIN_TAG = 'qq-bridge'
 const MAX_BUFFER = 200
 const MAX_LOG = 200

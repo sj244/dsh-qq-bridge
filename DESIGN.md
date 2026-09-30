@@ -146,7 +146,10 @@ qq_bridge_napcat
   传输层 `onebot.js`；离线测试 `test-onebot.mjs`；真机实录见 `HANDOVER.md` §12。
 - **M6（新增）** ✅ 出站闸门 `replyMode`（只发 `[QQ]…[/QQ]`）、上下文上限、
   非文本消息段占位符 —— 都是真机联调暴露出来才补的。见 `HANDOVER.md` §12.4–12.6。
-- **M3** ⛔ **未开始**：设置界面（昵称/白名单/概率/目标会话/日志）。
+- **M3** ✅ **已完成（待真机看一眼）**：设置界面 —— `设置 → 插件 → 插件配置` 里的「QQ 桥接」卡片。
+  关键发现：那一页**按 settings 命名空间派发卡片**，只有宿主半 = 交集为空 = 界面上什么都不出现，
+  所以补了浏览器半 `client/client.js`（手写 `__ModuleLoader__` bundle，不依赖构建步骤）
+  与 `package.json` 的 `dsh.client`。详见 `HANDOVER.md` §15。
 - **M4** ✅ **已完成**：打成 DSH bundle，`dsh plugin --profile web add <path>` 安装、重启、实测通过。
   （当前插件已被用户从 profile 卸载，源码与文档保留在本目录，可随时重装。）
 - **M5** ✅ **已完成（离线验证）**：NapCat 自助托管 —— 下载 / sha256 校验 / 纯 Node 解包 /
@@ -166,4 +169,5 @@ qq_bridge_napcat
 - 工具审批：**决定不桥接 `approval/request` 到 QQ**（2026-09-30）。无人值守时没有应答者 →
   危险操作**直接失败**（fail-closed），不会静默执行；同时注入的系统提示禁止无人值守时主动做特权操作，
   并把 QQ 消息当**不可信输入**（群友可注入），需要动手就停下等人。理由见 `HANDOVER.md` §14。
-- 形态：**host 平面 profile bundle**（像 dsh-cron 一样 `dsh plugin add` 安装），不是 agent preset。
+- 形态：**host 平面 profile bundle**（像 dsh-cron 一样 `dsh plugin add` 安装）+ **一个浏览器半**
+  （`dsh.client`，只为了那张设置卡片），不是 agent preset。
