@@ -750,6 +750,15 @@ window.__ModuleLoader__.load({
 > 卡片 UI 刻意用**原生 HTML + 内联样式**，不依赖 `@deepseek-ai/dsh-client-ui-primitives`：
 > 少一个会跨版本变的依赖；样式跟随主题文字色，深浅色都能看。以后想换官方组件再说。
 
+**真机验证（2026-09-30，用户操作）**：
+
+| 环节 | 证据 |
+|---|---|
+| 卡片出现 | 用户截图；`Slots` inspect 里 `settings.plugin.item` 的 occupants 多了 `qq-bridge` |
+| **读** | 卡片把 `session-3ba2ab52-…`、昵称列表等现有值正确显示出来 |
+| **写** | 用户在卡片里加了个昵称并保存 → `qq_bridge_status` 的 `settings.nicknames` 立刻变成 `['244','猫猫','卢本伟']` |
+| **生效** | 随后群里一句**没有 @** 的「卢本伟 测试一下…」被唤醒，日志 `reason: "nickname"` —— 界面 → settings 用户层 → `readSettings()` → `decide()` 整条链路都通了 |
+
 ### `onebot.js`（M2 传输层）
 
 | 位置（函数） | 作用 |

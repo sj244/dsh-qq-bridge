@@ -146,7 +146,8 @@ qq_bridge_napcat
   传输层 `onebot.js`；离线测试 `test-onebot.mjs`；真机实录见 `HANDOVER.md` §12。
 - **M6（新增）** ✅ 出站闸门 `replyMode`（只发 `[QQ]…[/QQ]`）、上下文上限、
   非文本消息段占位符 —— 都是真机联调暴露出来才补的。见 `HANDOVER.md` §12.4–12.6。
-- **M3** ✅ **已完成（待真机看一眼）**：设置界面 —— `设置 → 插件 → 插件配置` 里的「QQ 桥接」卡片。
+- **M3** ✅ **已完成并真机验证（读 / 写 / 生效全通）**：设置界面 —— `设置 → 插件 → 插件配置`
+  里的「QQ 桥接」卡片。
   关键发现：那一页**按 settings 命名空间派发卡片**，只有宿主半 = 交集为空 = 界面上什么都不出现，
   所以补了浏览器半 `client/client.js`（手写 `__ModuleLoader__` bundle，不依赖构建步骤）
   与 `package.json` 的 `dsh.client`。详见 `HANDOVER.md` §15。
