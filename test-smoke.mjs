@@ -676,6 +676,16 @@ if (sim) {
     )
     check('卡片渲染函数可调用', typeof cards[0]?.cell === 'function' && Boolean(cards[0].cell()))
 
+    // ★ 卡片必须覆盖**每一个** settings 键 —— 用户报的「设置里配不了 visionModel」就是这个：
+    // 它在 Schema 里有、卡片 FIELDS 里却没做输入框 → 用户根本改不到。这条断言专防它。
+    {
+      const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
+      const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
+      const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
+      check('每个 settings 键在卡片上都有输入框', notOnCard.length === 0, `缺：${notOnCard.join(', ')}（卡片共 ${cardKeys.length} 项）`)
+      check('卡片上的键都真实存在于 Schema（没写错名字）', cardKeys.every((k) => schemaKeys.includes(k)), cardKeys.filter((k) => !schemaKeys.includes(k)).join(', '))
+    }
+
     // 会话下拉的筛选规则（用户报的 bug：归档会话也混在下拉里）
     const so = mod.__test?.sessionOptions
     check('导出 sessionOptions 供离线测试', typeof so === 'function')

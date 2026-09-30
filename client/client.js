@@ -107,7 +107,22 @@ window.__ModuleLoader__.load({
         kind: 'text',
         hint: 'NapCat 的正向 WS 地址，如 ws://127.0.0.1:3001；留空 = 完全不启用传输。',
       },
+      { key: 'accessTokenEnv', label: 'Token 凭据名', kind: 'text', hint: 'access_token 所在的凭据引用名（环境变量名）；**别写明文 token**。留空 = 不用 token。' },
       { key: 'selfId', label: '机器人 QQ', kind: 'text', hint: '留空 = 连上后自动获取。' },
+      // ↓ 这些键以前只在 Schema 里、卡片上没做输入框，等于"设了也改不了"（用户报的正是这个）
+      {
+        key: 'visionModel',
+        label: '识图模型',
+        kind: 'text',
+        hint: '给图片写描述的多模态模型，形如 provider/model（如 deepseek-official/deepseek-v4-flash-vision-exp）；留空 = 自动找（优先名字带 vision 的）。',
+      },
+      { key: 'attachRecentChat', label: '附带未唤醒记录', kind: 'boolean', hint: '唤醒时是否把"未唤醒期间"的聊天记录一并附上。' },
+      { key: 'recentChatLimit', label: '附带条数', kind: 'number', hint: '上面那段摘要最多带最近几条（0–200）。' },
+      { key: 'napcatInstallDir', label: 'NapCat 目录', kind: 'text', hint: 'NapCat 安装目录；留空 = $DSH_HOME/napcat。' },
+      { key: 'napcatVersion', label: 'NapCat 版本', kind: 'text', hint: '要下载的版本 tag（如 v4.18.28）；留空 = 最新。' },
+      { key: 'downloadProxy', label: '下载代理', kind: 'text', hint: '下载 NapCat 用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量。' },
+      { key: 'onebotPort', label: 'OneBot 端口', kind: 'number', hint: '写进 NapCat 配置、并用来连的正向 WS 端口。' },
+      { key: 'qqNumber', label: '快速登录 QQ', kind: 'text', hint: '快速登录用的 QQ 号（需先成功登录过一次）。' },
     ]
 
     function format(field, raw) {
@@ -468,7 +483,7 @@ window.__ModuleLoader__.load({
     exports.name = 'dsh-qq-bridge'
     // 纯函数给离线测试用（test-smoke.mjs 会在假 ctx 里真跑这个 bundle）。
     // Cordis 只认 apply / inject / name / Config，多余的导出它不管。
-    exports.__test = { sessionOptions, draftFrom, parse }
+    exports.__test = { sessionOptions, draftFrom, parse, fields: FIELDS }
     return module.exports
   },
 })
