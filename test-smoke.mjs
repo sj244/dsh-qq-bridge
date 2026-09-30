@@ -20,13 +20,21 @@ let resolvedSettings = {}
 const registeredSettings = []
 // 捕获 ctx.on 注册的处理器：出站闸门要看「这一轮是不是 QQ 唤醒的」，只有真的喂事件才测得到
 const handlers = {}
+// 默认没有 agent；「端到端时序」那条用例会临时塞一个假 agent 进来
+let fakeAgent = null
 const ctx = {
   logger: { info() {}, warn: (m) => warnings.push(String(m)) },
   settings: {
     register: (ns, schema, opts) => { registeredSettings.push({ ns, schema }); resolvedSettings = { ...(opts?.base ?? {}) }; return {} },
     get: () => resolvedSettings,
   },
-  agents: { get: () => undefined, roots: () => [], resume: async () => { throw new Error('smoke: no agent factory') } },
+  agents: {
+    get: (id) => (fakeAgent && fakeAgent.id === id ? fakeAgent : undefined),
+    roots: () => [],
+    resume: async () => {
+      throw new Error('smoke: no agent factory')
+    },
+  },
   tools: { register: (def) => registered.push(def) },
   on: (name, fn) => {
     handlers[name] = fn
@@ -441,6 +449,48 @@ if (sim) {
     console.log('  settings/updated 抛错：', String(e?.message ?? e))
   }
   check('改 replyMode 时 settings/updated 处理器不抛错', settingsHandlerOk)
+}
+
+// ★ 端到端时序回归（哑火第 4 次的成因）：走**真实 handleInbound 路径**注入一条 QQ 消息，
+//   并让假 agent 的 followup() **同步**发出 turn/start（真机就是这个时序）。
+//   它专门盯"置位必须早于 send" —— 晚一拍，turn/start 就会快照到一个还没置位的 pending。
+{
+  const fire = (type, data) => handlers['session/event']({ id: 'session-smoke' }, { type, data })
+  const outbox = async () => JSON.parse(await status.execute({})).recentOutbox
+  const lastText = (a) => String(a[a.length - 1]?.text ?? '')
+  const gate = async () => JSON.parse(await status.execute({})).gate
+  const sendTool = registered.find((t) => t.name === 'qq_bridge_send')
+
+  fire('turn/end', { reason: { kind: 'completed' } }) // 清掉前一块可能残留的轮
+  resolvedSettings.replyMode = 'tool'
+
+  let injected = null
+  fakeAgent = {
+    id: 'session-smoke',
+    ctx: { get: () => undefined, effect: () => () => {} },
+    // 真机顺序：注入的 user/message → turn/start（**同步**，就在 followup 里面）
+    followup: (msg) => {
+      injected = msg
+      fire('user/message', msg)
+      fire('turn/start', { turn: 1 })
+    },
+  }
+
+  // 用"叫到昵称"来保证必然唤醒（概率分支会 sampled-out，那样根本走不到注入）
+  const r = JSON.parse(await sim.execute({ text: '244 在吗', userId: 'test-user' }))
+  check('模拟注入走通真实 handleInbound 路径', r?.decision?.delivered === true, JSON.stringify(r?.decision ?? r))
+  const text = String(injected?.content?.[0]?.text ?? '')
+  check('注入的消息带 QQ 前缀（isOurInbound 认得出）', text.startsWith('[QQ · ') || text.includes('[QQ 未唤醒期间聊天记录'), text.slice(0, 40))
+
+  const g = await gate()
+  check('同步 turn/start 的时序下归属正确（置位早于 send）', g.currentTurnFromQQ === true, JSON.stringify(g))
+
+  const sent = JSON.parse(await sendTool.execute({ text: '端到端：这条应该发得出去' }))
+  check('端到端：注入之后工具可用', sent.refused !== true && lastText(await outbox()) === '端到端：这条应该发得出去', JSON.stringify(sent))
+
+  fakeAgent = null
+  resolvedSettings.replyMode = 'marker'
+  fire('turn/end', { reason: { kind: 'completed' } })
 }
 
 // M3：settings Schema 直接生成设置界面上的表单 —— 每个键都必须有说明，否则界面里只剩裸键名

@@ -787,19 +787,24 @@ export function apply(ctx, config) {
     // agents.requireInitiator() 并在无发起者时抛错。
     const injected = makeMessage(text, imageBlocks)
     lastInjectedMessageId = injected?.id ?? null
+
+    // ⚠️⚠️ **必须在 send() 之前置位**。`agent.followup()` 会**同步**启动这一轮 ——
+    // `turn/start` 当场就到达，而它会快照 pending/claim。晚一步置位 = "标还没立、轮已经开了"，
+    // 整轮哑火。（2026-09-30 真机抓到的时序：gate = { pending: true, current: false,
+    // turnActive: true, claimed: false } —— pending 对、current 错，就是置位晚了一拍的指纹。）
+    pendingFromQQ = true
+    // 没有正在跑的轮就顺手认领这一轮；有正在跑的轮则不能改它 —— 这条消息会自己起一轮，
+    // 那时候 turn/start 会用 pendingFromQQ 快照。
+    if (!turnActive) {
+      currentTurnFromQQ = true
+      claimedFromQQ = true
+    }
+
     const send = () => agent.followup(injected)
     try {
       ctx.agents.withInitiator(agent, send)
     } catch {
       send()
-    }
-    // 这一轮是 QQ 唤醒的 —— 出站闸门要用（见下面的 pendingFromQQ / currentTurnFromQQ）。
-    pendingFromQQ = true
-    // 没有正在跑的轮，就直接认领下一轮（不依赖一定观察到 turn/start）；
-    // 有正在跑的轮，就不能改它 —— 这条消息会自己起一轮，那时候 turn/start 会快照 pendingFromQQ。
-    if (!turnActive) {
-      currentTurnFromQQ = true
-      claimedFromQQ = true
     }
     // 只移除**确实进了这次摘要**的那些条目（按对象身份），
     // 期间新到的消息要留在缓冲里等下一次唤醒。
