@@ -599,6 +599,8 @@ export function apply(ctx, config) {
 
   /** 一次唤醒最多给几张图做描述（每次描述 = 一次多模态调用，要控成本）。 */
   const MAX_DESCRIBE_PER_WAKE = 3
+  /** 单张图的描述最多试几次（1 次 + 2 次重试）—— 多模态调用有几率偶发失败。 */
+  const VISION_ATTEMPTS = 3
 
   let visionModelCache
   /**
@@ -626,7 +628,10 @@ export function apply(ctx, config) {
         } catch {
           models = []
         }
-        const hit = models.find((m) => Array.isArray(m.inputModalities) && m.inputModalities.includes('image'))
+        const isVision = (m) => Array.isArray(m.inputModalities) && m.inputModalities.includes('image')
+        // 偏好顺序：① 名字里带 vision 的（如 deepseek-v4-flash-vision-exp）→ ② 其余支持图片的。
+        // 名字带 vision 的通常是专门的视觉模型，比"顺带支持图片"的主力模型更稳。
+        const hit = models.find((m) => isVision(m) && /vision/i.test(String(m.id))) ?? models.find(isVision)
         if (hit) {
           visionModelCache = { provider: hit.provider ?? p.id, model: hit.id }
           logger.info(`视觉模型：${visionModelCache.provider}/${visionModelCache.model}`)
@@ -669,20 +674,36 @@ export function apply(ctx, config) {
         ],
         source: { kind: 'plugin', plugin: PLUGIN_TAG },
       })
-      let out = ''
-      let finish = ''
-      for await (const chunk of llm.stream({ provider: conf.provider, model: conf.model, messages: [message], maxTokens: 300 })) {
-        if (chunk.type === 'text-delta') out += chunk.text
-        if (chunk.type === 'finish') {
-          finish = chunk.reason?.kind ?? ''
-          if (finish === 'error' || finish === 'aborted') {
-            return { ok: false, reason: `模型返回 ${finish}${chunk.reason?.failure?.message ? '：' + chunk.reason.failure.message : ''}` }
+      let lastReason = '未知原因'
+      // 多模态调用**有几率失败**（网络/限流/偶发空回复），一次失败就不发描述太亏了 ——
+      // 用户报过"识图还是有几率调用失败"。所以：1 次 + 2 次重试，退避 300/600ms。
+      for (let attempt = 1; attempt <= VISION_ATTEMPTS; attempt++) {
+        try {
+          let out = ''
+          let finish = ''
+          for await (const chunk of llm.stream({ provider: conf.provider, model: conf.model, messages: [message], maxTokens: 300 })) {
+            if (chunk.type === 'text-delta') out += chunk.text
+            if (chunk.type === 'finish') {
+              finish = chunk.reason?.kind ?? ''
+              if (finish === 'error' || finish === 'aborted') {
+                throw new Error(`模型返回 ${finish}${chunk.reason?.failure?.message ? '：' + chunk.reason.failure.message : ''}`)
+              }
+              break
+            }
           }
-          break
+          const text = out.trim()
+          if (text) return { ok: true, text }
+          lastReason = `模型返回空内容（finish=${finish || '?'}）`
+        } catch (error) {
+          lastReason = error?.message ?? String(error)
+        }
+        if (attempt < VISION_ATTEMPTS) {
+          logger.warn(`图片描述第 ${attempt} 次失败（${lastReason}），重试`)
+          await new Promise((r) => setTimeout(r, 300 * attempt))
         }
       }
-      const text = out.trim()
-      return text ? { ok: true, text } : { ok: false, reason: `模型返回空内容（finish=${finish || '?'}）` }
+      logger.warn(`图片描述失败（含重试共 ${VISION_ATTEMPTS} 次）：${lastReason}`)
+      return { ok: false, reason: lastReason }
     } catch (error) {
       const reason = error?.message ?? String(error)
       logger.warn(`图片描述失败：${reason}`)
