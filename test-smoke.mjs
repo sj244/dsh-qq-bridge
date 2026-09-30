@@ -249,6 +249,7 @@ if (sim) {
   const src = existsSync(clientPath) ? readFileSync(clientPath, 'utf8') : ''
   check('bundle 用 __ModuleLoader__.load 包装', src.includes('window.__ModuleLoader__.load'))
   check('模块 id 与包名一致（否则浏览器取不到这个 bundle）', src.includes(`id: '${pkg.name}'`))
+  check('导出 name = 包名（inspect 里能认出是谁注册的卡片）', src.includes(`exports.name = '${pkg.name}'`))
   // 卡片按 settings 命名空间派发：key 与宿主注册的 NS 不一致 = 界面上静默什么都不出现
   check('卡片 key 与宿主 settings 命名空间一致', src.includes(`const NS = '${NS}'`) && src.includes('key: NS'))
   check('注册进 settings.plugin.item', src.includes("'settings.plugin.item'"))

@@ -702,8 +702,16 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 ```
 
 `dsh-client-modules` 在**启动时扫描启用的 loader 条目**，把每个带 `dsh.client` 的包变成一份挂在
-`/plugins` 下的 bundle，浏览器按需懒加载 —— **不需要重新构建 web 前端**；
-但**改了 `package.json` 必须重启 `dsh web`**（boot graph 在启动时组合）。
+`/plugins` 下的 bundle，浏览器按需懒加载 —— **不需要重新构建 web 前端**。
+
+> ⚠️ **两步都得做，少一步就是看不到卡片**（真机上完整踩过一遍）：
+> 1. **重启 `dsh web`** —— boot graph 在启动时组合，只改 `package.json` 不重启等于没改；
+> 2. **刷新浏览器页面（F5）** —— boot graph 是**页面加载时**注入的（`window.__DSH_BOOT__`）。
+>    重启服务器只会让已经打开的页面断线重连，它手里仍是旧的那份清单，**压根不知道新 bundle 存在**。
+>
+> **症状对照**：`qq_bridge_status.clientHalf.inBootGraph` 已经是 `true`（宿主认得），
+> 但 `Slots` inspect 里 `settings.plugin.item` 的 occupants 里**没有** `qq-bridge` ——
+> 那就一定是页面没刷新，而不是代码有问题。
 > 旁证：第三方插件 `dshmarket` 就活在这个部署里（`Slots` inspect 能看到它的卡片占着
 > `settings.plugin.item` 的 `dsh-market` key），说明仓库外的浏览器半确实会被加载。
 

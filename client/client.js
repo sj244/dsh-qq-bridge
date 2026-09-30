@@ -358,6 +358,9 @@ window.__ModuleLoader__.load({
 
     exports.apply = apply
     exports.inject = inject
+    // 导出 name：Cordis 用它做插件标识，Slots inspect 里的 registrant 会显示成它
+    // （不导的话那边显示的是产物里的 fallback 短名，排障时认不出是谁注册的卡片）。
+    exports.name = 'dsh-qq-bridge'
     return module.exports
   },
 })
