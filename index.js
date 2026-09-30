@@ -785,7 +785,9 @@ export function apply(ctx, config) {
     }
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
-    const send = () => agent.followup(makeMessage(text, imageBlocks))
+    const injected = makeMessage(text, imageBlocks)
+    lastInjectedMessageId = injected?.id ?? null
+    const send = () => agent.followup(injected)
     try {
       ctx.agents.withInitiator(agent, send)
     } catch {
@@ -1090,15 +1092,53 @@ export function apply(ctx, config) {
    * DSH 那一轮里出现的标记块也会被发进群，等于把闸门开在了错误的维度上
    * （用户 2026-09-30 报的正是这个：「agent 分不清是在 QQ 还是 DSH 里」）。
    *
-   * 判据是**最近一条 user/message 的来源**：
-   *   - `kind === 'user'`                        → 人在 DSH 里打字，不是 QQ 轮
-   *   - `kind === 'plugin'` 且 plugin 是我们自己  → QQ 唤醒的那一轮
-   *   - 其他 plugin（cron / goal / 别人）        → 也不是 QQ 轮（严格一点，宁可漏发）
-   *   - `tool` / `model` / 未知                  → **不动标记**（工具结果也是 user/message，
-   *     不能让它在同一轮中间把标记冲掉）
-   * 默认 false = 没有 QQ 唤醒就不出站（fail-closed）。
+   * 判据（**三条并用**，因为真机上出现过错判 → 哑火）：
+   *   ① 注入时直接置位（注入方最清楚这一轮是谁叫的）；
+   *   ② `user/message` 被认出是**我们自己灌进去的那条**（见 `isOurInbound`）→ 置位；
+   *   ③ 认不出、且 `source.kind === 'user'`（人在 DSH 里打字）或别的插件注入 → 清除；
+   *   ④ `tool` / `model` / 未知来源 → **不动标记**（工具结果也是 user/message，
+   *      不能让它在同一轮中间把标记冲掉）。
+   * `turn/end` 消费一次即归零；默认 false = 没有 QQ 唤醒就不出站（fail-closed）。
+   *
+   * ⚠️ 曾经只按 ③ 的 source 判，结果 244 那边出现哑火：用户明明是用 QQ @ 的，
+   * 工具却报「本轮不是 QQ 唤醒的」。**教训：不要用单一字段去推断"这条消息来自谁"，
+   * 那个字段可能被上游重写；要有一个自己能对上的锚（这里是消息 id + 正文前缀）。**
    */
   let turnFromQQ = false
+
+  /**
+   * 最近一次注入的 QQ 消息 id —— 用来**认出**「这条 user/message 就是我们自己灌进去的」。
+   *
+   * ⚠️ 为什么不能只看 `source.kind`：真机上出现过哑火 —— 用户明明是用 QQ @ 的，
+   * 工具却报「本轮不是 QQ 唤醒的」。也就是说，那条注入消息在事件里**没有被认成我们的**
+   * （source 被重写 / id 被换 / 事件顺序不对，任一都可能）。所以判据要放宽成三条并用：
+   *   ① 消息 id 等于我们刚注入的那条；② 正文以 QQ 入站前缀开头；③ 才是 source。
+   * 放宽带来的唯一风险是"DSH 里有人手打一段以 `[QQ · ` 开头的话"——那也不吃亏：
+   * 它本来就长得像 QQ 消息。
+   */
+  let lastInjectedMessageId = null
+
+  /** 判断一条 user/message 是不是我们自己（qq-bridge）灌进去的 QQ 入站消息。 */
+  function isOurInbound(msg) {
+    if (!msg || typeof msg !== 'object') return false
+    if (lastInjectedMessageId && msg.id === lastInjectedMessageId) return true
+    const text = messageText(msg)
+    return text.startsWith('[QQ · ') || text.startsWith('[QQ 未唤醒期间聊天记录')
+  }
+
+  /** 最近的 user/message 观测（排障用：哑火时能看到它到底长什么样）。 */
+  const inboundProbe = []
+  function noteInboundProbe(msg, kind, plugin, matched) {
+    inboundProbe.push({
+      at: Date.now(),
+      kind,
+      plugin: plugin ?? null,
+      id: msg?.id ?? null,
+      ours: matched,
+      text: messageText(msg).slice(0, 60),
+    })
+    if (inboundProbe.length > 8) inboundProbe.shift()
+  }
 
   ctx.on('session/event', guarded('session/event', (session, event) => {
     const targetId = readSettings().targetSessionId
@@ -1106,9 +1146,14 @@ export function apply(ctx, config) {
     const data = event?.data ?? {}
 
     if (event.type === 'user/message') {
-      const source = data.source ?? data.message?.source ?? {}
+      // data 可能是 {turn, step, message}，也可能直接是 UserMessage —— 两种都兜住。
+      const msg = data.message ?? data
+      const source = msg?.source ?? {}
       const kind = typeof source.kind === 'string' ? source.kind : 'unknown'
-      if (kind === 'user') turnFromQQ = false
+      const mine = isOurInbound(msg)
+      noteInboundProbe(msg, kind, source.plugin, mine)
+      if (mine) turnFromQQ = true
+      else if (kind === 'user') turnFromQQ = false
       else if (kind === 'plugin') turnFromQQ = source.plugin === PLUGIN_TAG
       return
     }
@@ -1242,6 +1287,8 @@ export function apply(ctx, config) {
           })),
           recentLog: state.log.slice(-15),
           recentOutbox: state.outbox.slice(-3),
+          // 排障用：最近观测到的 user/message 长什么样（哑火时看这里 —— ours=false 就说明没认出来）
+          recentInboundSources: inboundProbe.slice(-5),
           // M3：浏览器半有没有被 web 宿主组合进 boot graph。
           // 界面里看不到卡片时先看这里 —— 最常见的原因是改了 package.json 没重启。
           clientHalf: clientHalfStatus(),

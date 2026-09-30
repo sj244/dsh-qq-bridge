@@ -218,8 +218,10 @@ if (sim) {
 {
   const fire = (type, data, extra = {}) => handlers['session/event']({ id: 'session-smoke' }, { type, data, ...extra })
   const outbox = async () => JSON.parse(await status.execute({})).recentOutbox
-  const dump = (m, a) => JSON.stringify({ m, last: a.slice(-1)[0]?.text ?? null, n: a.length })
-  const before = (await outbox()).length
+  // ⚠️ status 只暴露 outbox 最后 3 条 —— 断言一律看**最新那条的内容**，不要比长度
+  //（长度比到 3 就永远相等，那种断言是"碰巧通过"）。
+  const lastText = (a) => String(a[a.length - 1]?.text ?? '')
+  const sawText = (a, s) => a.some((o) => String(o.text ?? '').includes(s))
   const reply = (text) => fire('assistant/message', { message: { content: [{ type: 'text', text }] } })
   const end = () => fire('turn/end', { reason: { kind: 'completed' } })
 
@@ -227,36 +229,52 @@ if (sim) {
   fire('user/message', { source: { kind: 'user' } })
   reply('[QQ]DSH 里聊出来的标记块不该进群[/QQ]')
   end()
-  const a = await outbox()
-  check('DSH 触发的轮次：标记块不出站', a.length === before, dump('A', a))
+  check('DSH 触发的轮次：标记块不出站', !sawText(await outbox(), 'DSH 里聊出来的标记块'))
 
   // B) QQ 注入的那一轮：正常出站
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   reply('这段只给 DSH 看\n[QQ]群里看到这句[/QQ]')
   end()
-  const b = await outbox()
-  check('QQ 触发的轮次：正常出站且只取块内', b.length === before + 1 && b[b.length - 1].text === '群里看到这句', dump('B', b))
+  check('QQ 触发的轮次：正常出站且只取块内', lastText(await outbox()) === '群里看到这句', lastText(await outbox()))
 
   // C) 工具结果也是 user/message，不能把「这轮来自 QQ」冲掉
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   fire('user/message', { source: { kind: 'tool' } })
   reply('[QQ]工具跑完后的回复[/QQ]')
   end()
-  const c = await outbox()
-  check('工具结果不会冲掉「来自 QQ」的标记', c.length === before + 2 && c[c.length - 1].text === '工具跑完后的回复', dump('C', c))
+  check('工具结果不会冲掉「来自 QQ」的标记', lastText(await outbox()) === '工具跑完后的回复', lastText(await outbox()))
 
   // D) 别的插件（cron / goal / 别人）注入的轮次同样不出站
   fire('user/message', { source: { kind: 'plugin', plugin: 'dsh-cron' } })
   reply('[QQ]cron 那一轮[/QQ]')
   end()
-  const d = await outbox()
-  check('别的插件触发的轮次也不出站', d.length === before + 2, dump('D', d))
+  check('别的插件触发的轮次也不出站', !sawText(await outbox(), 'cron 那一轮'))
 
   // E) 没有 user/message 直接 turn/end（冷启动等）→ fail-closed
   reply('[QQ]没有来源信息[/QQ]')
   end()
-  const e = await outbox()
-  check('没有来源信息时 fail-closed', e.length === before + 2, dump('E', e))
+  check('没有来源信息时 fail-closed', !sawText(await outbox(), '没有来源信息'))
+
+  // F) **真机哑火回归**：source 被上游重写成 'user'，但正文就是我们注入的 QQ 入站消息
+  //    → 必须仍然按「QQ 唤醒的那一轮」算，否则就是"用户明明用 QQ @ 了却发不出去"。
+  fire('user/message', {
+    source: { kind: 'user' },
+    message: {
+      id: 'm-qq-1',
+      content: [{ type: 'text', text: '[QQ · 某群] 某人：在吗\n（回 QQ：用 qq_bridge_send 工具）' }],
+    },
+  })
+  reply('[QQ]回归通过[/QQ]')
+  end()
+  check('回归：source 被改写成 user 也不哑火（按正文前缀认出来）', lastText(await outbox()) === '回归通过', lastText(await outbox()))
+
+  // 排障入口：status 里要能看到最近观测到的 user/message（哑火时看 ours 是不是 false）
+  const probe = JSON.parse(await status.execute({})).recentInboundSources
+  check(
+    'status 暴露 recentInboundSources（排障用）',
+    Array.isArray(probe) && probe.some((p) => p.ours === true) && probe.some((p) => p.ours === false),
+    JSON.stringify(probe?.slice(-2)),
+  )
 }
 
 // 注入的用法说明是一份**产品契约**：出站标记 / 群聊礼仪 / 无人值守特权禁令 / 监听模式用法
@@ -311,15 +329,16 @@ if (sim) {
 
   const fire = (type, data) => handlers['session/event']({ id: 'session-smoke' }, { type, data })
   const outbox = async () => JSON.parse(await status.execute({})).recentOutbox
+  const lastText = (a) => String(a[a.length - 1]?.text ?? '')
+  const sawText = (a, s) => a.some((o) => String(o.text ?? '').includes(s))
   const sendTool = registered.find((t) => t.name === 'qq_bridge_send')
-  const base = (await outbox()).length
 
   // 切到 tool 模式：标记块这条路被关掉
   resolvedSettings.replyMode = 'tool'
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   fire('assistant/message', { message: { content: [{ type: 'text', text: '[QQ]tool 模式下标记块应该无效[/QQ]' }] } })
   fire('turn/end', { reason: { kind: 'completed' } })
-  check('tool 模式：标记块不出站（开关把它关了）', (await outbox()).length === base)
+  check('tool 模式：标记块不出站（开关把它关了）', !sawText(await outbox(), 'tool 模式下标记块应该无效'))
 
   // 工具在 DSH 轮里被拒绝，并且**明确把原因回给模型**（这就是工具方案要的那个反馈回路）
   fire('user/message', { source: { kind: 'user' } })
@@ -329,18 +348,14 @@ if (sim) {
     refused.refused === true && refused.sent === 0 && String(refused.reason).includes('DSH'),
     JSON.stringify(refused),
   )
-  check('被拒绝的调用不记 outbox', (await outbox()).length === base)
+  check('被拒绝的调用不记 outbox', !sawText(await outbox(), '不该发出去'))
 
   // 工具在 QQ 轮里走通，并记 outbox（via: tool）
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   const sent = JSON.parse(await sendTool.execute({ text: '工具发出去的话' }))
   const ob = await outbox()
-  check('工具：QQ 轮里不再被拒（发送路径走通）', sent.refused !== true && ob.length === base + 1, JSON.stringify(sent))
-  check(
-    '工具发送记进 outbox（via: tool）',
-    ob[ob.length - 1]?.via === 'tool' && ob[ob.length - 1]?.text === '工具发出去的话',
-    JSON.stringify(ob[ob.length - 1]),
-  )
+  check('工具：QQ 轮里不再被拒（发送路径走通）', sent.refused !== true && lastText(ob) === '工具发出去的话', JSON.stringify(sent))
+  check('工具发送记进 outbox（via: tool）', ob[ob.length - 1]?.via === 'tool', JSON.stringify(ob[ob.length - 1]))
 
   // 复位，别影响后面的块
   resolvedSettings.replyMode = 'marker'

@@ -845,7 +845,18 @@ window.__ModuleLoader__.load({
 
 **消息来源的形状**（rc.3 类型里核实过）：`MessageSourceMap` =
 `{kind:'user'}` / `{kind:'plugin', plugin}` / `{kind:'model'}` / `{kind:'tool'}`；
-`user/message` 事件的 `data` 就是带 `.source` 的 `UserMessage`。
+`user/message` 事件的 `data` 是 `{turn, step, message}`（也可能直接是 `UserMessage`，两种都要兜）。
+
+> ⚠️ **别只靠 `source` 字段判断「这条消息来自谁」**（真机哑火教训，2026-09-30）：
+> 244 那边报「我确实是用 QQ @ 的」，工具却回「本轮不是 QQ 唤醒的」——
+> 说明那条注入消息在事件流里**没被认成我们的**（source 被重写 / id 被换 / 事件顺序，任一都可能）。
+> 现在 `isOurInbound()` **三条并用**：① 消息 id 等于我们刚注入的那条；② 正文以 QQ 入站前缀
+> （`[QQ · ` 或 `[QQ 未唤醒期间聊天记录`）开头；③ 才轮到 `source`。
+> 放宽的唯一风险是"DSH 里有人手打一段以 `[QQ · ` 开头的话"，那也不吃亏 —— 它本来就长得像 QQ 消息。
+> **通用教训：凡是"上游可能重写"的字段，都必须配一个自己能对上的锚。**
+>
+> 另外 `qq_bridge_status` 多了 `recentInboundSources`（最近 5 条 `user/message` 观测，带 `ours` 标记）——
+> 再出哑火先看那里：`ours: false` = 没认出来；`ours: true` 但工具仍被拒 = 标被别的事件清掉了。
 
 **测试**：`test-smoke.mjs` 现在会捕获 `ctx.on` 的处理器并直接喂 `session/event`，
 覆盖五种来源（DSH 用户 / 本插件 / 工具结果 / 别的插件 / 无来源），方向全是 fail-closed。
