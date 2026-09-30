@@ -1075,12 +1075,28 @@ export function apply(ctx, config) {
         return
       }
 
-      state.outbox.push({ at: Date.now(), sessionId: session.id, endReason: kind, text: text.slice(0, 4000) })
-      if (state.outbox.length > MAX_OUTBOX) state.outbox = state.outbox.slice(-MAX_OUTBOX)
-      saveState()
+      recordOutbox({
+        sessionId: session.id,
+        via: s.replyMode === 'always' ? 'always' : 'marker',
+        endReason: kind,
+        text,
+      })
       sendToQQ(text).catch((e) => logger.warn(`sendToQQ failed: ${e?.message ?? e}`))
     }
   }))
+
+  /**
+   * 记一条「真的发到 QQ 了」的台账。
+   *
+   * 为什么要记：出站有**两条**路 —— ① 每轮结束时的标记块闸门，② `qq_bridge_send` 工具（刻意绕过闸门）。
+   * 只记第①条的话，「群里冒出消息了，是漏了还是有人故意发的？」就答不上来。
+   * 所以两条路都落进同一个 outbox，并用 `via` 标出来源（marker / always / tool）。
+   */
+  function recordOutbox(entry) {
+    state.outbox.push({ at: Date.now(), ...entry, text: String(entry.text ?? '').slice(0, 4000) })
+    if (state.outbox.length > MAX_OUTBOX) state.outbox = state.outbox.slice(-MAX_OUTBOX)
+    saveState()
+  }
 
   function messageText(message) {
     const blocks = Array.isArray(message?.content) ? message.content : []
@@ -1159,7 +1175,10 @@ export function apply(ctx, config) {
 
     ctx.tools.register(defineTool({
       name: 'qq_bridge_send',
-      description: '立刻通过 OneBot 发一条消息（调试用，不经过目标会话）。默认发给最后一次入站的目的地。',
+      description:
+        '立刻通过 OneBot 发一条消息。**这会刻意绕过出站闸门**（不需要标记块），' +
+        '所以只用于测试连通性、或你明确要求"直接发这一条"；**正常回复群里请走标记块**。' +
+        '每次调用都会记进 outbox（via: tool），事后可以从 qq_bridge_status 查到。',
       parameters: {
         text: { type: 'string', required: true, description: '要发送的文本。' },
         userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用最后一次入站目的地。' },
@@ -1174,6 +1193,12 @@ export function apply(ctx, config) {
             : undefined
         try {
           const result = await sendToQQ(args.text, dest)
+          recordOutbox({
+            sessionId: 'tool:qq_bridge_send',
+            via: 'tool',
+            to: result?.destination ?? dest ?? state.lastDestination,
+            text: args.text,
+          })
           return JSON.stringify(result, null, 2)
         } catch (error) {
           return JSON.stringify({ error: error?.message ?? String(error) }, null, 2)
@@ -1493,6 +1518,8 @@ export function buildUsagePrompt(s = {}) {
     '【怎么把话说回 QQ】',
     '- 只有放在 [QQ] 与 [/QQ] 之间的内容才会发出去（开标记必须**独占行首**）；一轮可以写多个块。',
     '- 没有块就一个字都不会发。给自己看的分析、命令、路径、结论，全部写在块外面。',
+    '- 回群**只用标记块**。`qq_bridge_send` 是刻意绕过闸门的工具（测连通性、或明确要求直接发），',
+    '  别拿它当回复通道 —— 它发出去的东西同样会进群，而且会被记进 outbox 台账。',
     '- 块里的字 = 群里每个人都会看到的话。QQ 是聊天，不是工作台。',
     '',
     '【群聊礼仪】',
