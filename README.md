@@ -344,3 +344,5 @@ node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / �
 - **M8** ✅ 分得清「在 QQ 还是 DSH 里」：**出站闸门按来源生效**（只有被 QQ 唤醒的那一轮才发）、
   **出站方式做成开关**（`replyMode: 'marker' | 'tool' | 'always'`）、改模式**立刻重挂**提示词；
   「这一轮来自谁」不再只信 `source` 字段 —— 改成认消息 id 与正文前缀，治掉真机上的哑火
+
+完整的版本变更记录见 [`CHANGELOG.md`](./CHANGELOG.md)。当前版本 **v0.1.0**。
