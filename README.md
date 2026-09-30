@@ -1,10 +1,23 @@
 # dsh-qq-bridge
 
+**English** · Connect one **fixed DSH session** to QQ (OneBot / NapCat) and **keep its context** —
+no new session, no re-priming. A **fail-closed whitelist** gates who may drive it; **@-mentions and
+nicknames always wake** the model; everything else is only recorded (zero model calls) until a
+**configurable sampling probability** hits or the model opens a short **follow-up window**.
+Ships a settings card in **Settings → Plugins → Plugin configuration** and can download, configure
+and launch **NapCat** for you.
+
 把一个**固定的 DSH 会话**接到 QQ（OneBot / NapCat 个人号），**保留原上下文**。
 
-设计见 [`DESIGN.md`](./DESIGN.md)。当前进度：**M1 + M2 已完成**（固定会话注入 + 唤醒策略 + OneBot 收发 + 调试工具）。
+```sh
+dsh plugin --profile web add github:sj244/dsh-qq-bridge
+```
 
-这是一个vibecoding项目，几乎完全由dsh创建
+> Created with DSH itself — this is a vibecoding project. / 这是个 vibecoding 项目，几乎完全由 DSH 写成。
+
+设计见 [`DESIGN.md`](./DESIGN.md)，里程碑与真机实录见 [`HANDOVER.md`](./HANDOVER.md)。
+当前进度：**M1–M7 全部完成**（固定会话注入 / OneBot 收发 / 设置界面 / bundle / NapCat 自助托管 /
+图片缓存与多模态描述 / 会话跟随 / 安全边界），并已在真实 NapCat + 真实 QQ 上端到端跑通。
 
 ## 唤醒策略
 

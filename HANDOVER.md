@@ -502,7 +502,7 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 ```
 1. 下载 NapCat.Shell.zip（GitHub 镜像 ghfile.geekertao.top；被限速时 curl -C - 续传即可恢复满速）
    校验 sha256（Release API 的 asset.digest）
-2. 解包到任意目录（本机：C:\Users\zrl\.dsh\napcat\NapCat.Shell\）
+2. 解包到任意目录（示例：`%USERPROFILE%\.dsh\napcat\NapCat.Shell\`）
 3. 预写 config/onebot11.json —— 正向 WS 服务端 127.0.0.1:3001、reportSelfMessage=false
    再写 config/webui.json、config/napcat.json（fileLog:true, fileLogLevel:debug 便于排障）
 4. **让用户自己双击 launcher-win10.bat**（会弹 UAC）→ NapCat 拉起无头 QQ 并注入
@@ -760,9 +760,48 @@ window.__ModuleLoader__.load({
 | 环节 | 证据 |
 |---|---|
 | 卡片出现 | 用户截图；`Slots` inspect 里 `settings.plugin.item` 的 occupants 多了 `qq-bridge` |
-| **读** | 卡片把 `session-3ba2ab52-…`、昵称列表等现有值正确显示出来 |
-| **写** | 用户在卡片里加了个昵称并保存 → `qq_bridge_status` 的 `settings.nicknames` 立刻变成 `['244','猫猫','卢本伟']` |
-| **生效** | 随后群里一句**没有 @** 的「卢本伟 测试一下…」被唤醒，日志 `reason: "nickname"` —— 界面 → settings 用户层 → `readSettings()` → `decide()` 整条链路都通了 |
+| **读** | 卡片把 `<TARGET_SESSION_ID>`、昵称列表等现有值正确显示出来 |
+| **写** | 用户在卡片里加了个昵称并保存 → `qq_bridge_status` 的 `settings.nicknames` 立刻变成 `['244','猫猫','测试昵称']` |
+| **生效** | 随后群里一句**没有 @** 的「测试昵称 在吗」被唤醒，日志 `reason: "nickname"` —— 界面 → settings 用户层 → `readSettings()` → `decide()` 整条链路都通了 |
+
+## 16. 上架插件市场（awesome-dsh-plugin）
+
+规范：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md>
+条目文件：`docs/awesome-dsh-plugin-entry.yml`（复制成 `data/plugins/sj244__dsh-qq-bridge.yml` 后开 PR）。
+
+**要求对照**：
+
+| 要求 | 我们的状态 |
+|---|---|
+| 声明 `dsh.bundle` manifest | ✅ `dsh.bundle.patch` → `cordis.patch.yml`（另有浏览器半的 `dsh.client`；**只声明 `dsh.client` 不够**，那是最常见的被拒原因） |
+| 真实可用的代码 | ✅ 主机半 + 浏览器半 + 三套离线测试 |
+| 仓库创建满 1 天 | ⏳ `created_at = 2026-09-29T20:33:45Z` → **2026-10-01 04:33（北京）之后**才过 CI |
+| 仓库带 `dsh-plugin` topic | ⏳ **要手动加**（没有 GitHub API token，我加不了） |
+| 官方 `@deepseek-ai/*` 走 peerDependencies | ✅ |
+| 描述如实、无营销词 | ✅ 一句话，只写做到的事 |
+| 分类贴切 | `notify` —— 同类（`dsh-qq-onebot-bridge`、`dsh-im-qq`）都在 README 的 “Notifications & Integrations” 一节 |
+| 不与现有条目重复 | ⚠️ 已有若干 QQ 桥（`dsh-qq-onebot-bridge` ★5、`dsh-onebot` 等）。差异点是**接「已存在的固定会话」并保留原上下文**（多数方案是「每个群/每个人一个独立会话」）＋省 token 的唤醒策略 —— 条目描述必须把这个差异写出来 |
+| 源码无可疑内容 | ✅ 无混淆、无安装期执行、无凭据外传（`accessTokenEnv` 只存凭据引用名） |
+
+**peerDependencies 为什么留 `*`**：规范特别警告「不带显式预发布分支的范围会**静默排除** harness 的
+预发布构建」——node-semver 只有当范围内某个比较符与该版本的 `major.minor.patch` 元组完全一致、
+且自身带预发布标签时才放行。本插件跟的是 `0.1.5-rc.3` 这类版本，而
+`>=0.0.1-rc.1 <0.2.0-0` 这种「看起来匹配一切」的范围在 `0.1.5` 元组上没有带预发布标签的比较符，
+**照样匹配不到**。`*` 是唯一不会静默排除的写法，所以留 `*`。
+
+**上架前做的清理**（公开仓库，先把个人信息清掉）：
+- `HANDOVER.md` 一处真实本机路径 `C:\Users\<用户名>\…` → `%USERPROFILE%\…`；
+- 一处真实会话 id 与群友聊天内容 → `<TARGET_SESSION_ID>` / 占位昵称。
+- **发布前每次跑一遍**：`git grep -n -i -E "<关键词>"`，关键词至少覆盖 QQ 号、群号、会话 id、用户名、本机路径。
+- `package.json` 去掉 `private: true`（留着就没法发 npm；规范说 npm 可选，但别把门焊死）。
+
+**可选、尚未做**：
+- `screenshots.json`（市场详情页 1–8 张截图）：用户发来的设置卡片截图里带着真实会话 id 和群号，
+  **没经他同意不放**。要么要一张打过码的，要么跳过（不声明时市场会从 README 自动抽图）。
+- 发布到 npm（预构建安装可跳过构建授权）；要发的话 `repository` 字段必须指回本仓库（已经是了）。
+
+**提交方式**：把 `docs/awesome-dsh-plugin-entry.yml` 复制成 `data/plugins/sj244__dsh-qq-bridge.yml`，
+推到 fork 的分支后开 PR。一个 PR 最多 3 条（我们 1 条），README 由脚本生成、别手改。
 
 ### `onebot.js`（M2 传输层）
 
