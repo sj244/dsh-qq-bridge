@@ -379,12 +379,12 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { style: S.hint },
-            '在 DSH 0.2.0（web-all 0.4.x）上，第三方插件的设置界面还没接上 —— 这是平台的已知缺口（DSH #677 的迁移未完成），不是本插件的问题。',
+            '宿主的两条设置通道都没拿到：插件配置表单（DSH 0.2.0 的 #677 迁移未完成）与本插件的本机设置接口。',
           ),
           h(
             'div',
             { style: S.hint },
-            '现在改设置：点右上角「打开配置文件」，在 profile 的 cordis.patch.yml 里加/改 `- id: qq-bridge` 的 config（字段名见 README「接入 QQ」一节），改完重启生效。',
+            '先看诊断里「本机接口」那项：若宿主没有 webServer 服务，接口挂不上（此时仍可点右上角「打开配置文件」，改 profile 的 cordis.patch.yml 里 `- id: qq-bridge` 的 config 后重启）。',
           ),
           h(
             'div',
@@ -520,8 +520,98 @@ window.__ModuleLoader__.load({
      * 只绑前者的话，0.2.0 上永远拿到 `unavailable`，用户看到的就是"这个部署没有为 qq-bridge
      * 提供可写的设置服务"（2026-10-01 桌面端真机）。所以**两个都绑，谁 ready 用谁**。
      */
+    /** 0.2.0 的兜底数据源：宿主自己挂的本机接口（见宿主半的 handleSettingsRequest）。 */
+    const API_PATH = '/api/qq-bridge/settings'
+    /** 稳定引用：useSyncExternalStore 的 getSnapshot 每次返回新对象会死循环。 */
+    const LOADING_SNAPSHOT = { status: 'loading' }
+    const UNAVAILABLE_SNAPSHOT = { status: 'unavailable' }
+
+    /**
+     * 走宿主本机接口的设置域（0.2.0 用）。
+     *
+     * 为什么需要它：0.2.0 的 `webUiSettings` 桥对第三方插件永远返回 `unavailable`
+     * （证据见 docs/dsh-0.2.0-migration.md）。范本：皮肤中心
+     * `@linxin666/dsh-client-ui-skin-center` 就是自己 `inject: ["webServer"]` 挂
+     * `/api/skin-center/...`，浏览器半直接 fetch 它，全程不碰宿主 settings 服务。
+     *
+     * 小 store：fetch 一次 → 缓存 snapshot → 通知订阅者；`set` 走 POST 再刷新。
+     * 快照形状与宿主 scope 对齐（`status` / `value` / `user` / `writable`），卡片不用改。
+     */
+    function createApiScope() {
+      const listeners = new Set()
+      let snapshot = { status: 'idle' }
+      let started = false
+      const publish = (next) => {
+        snapshot = next
+        for (const listener of [...listeners]) {
+          try {
+            listener()
+          } catch {
+            // 一个订阅者抛错不该影响别人
+          }
+        }
+      }
+      const accept = (body) => {
+        const overridden = Array.isArray(body?.overridden) ? body.overridden : []
+        publish({
+          status: 'ready',
+          value: body?.values && typeof body.values === 'object' ? body.values : {},
+          user: Object.fromEntries(overridden.map((key) => [key, true])),
+          writable: true,
+        })
+      }
+      const load = async () => {
+        if (typeof fetch !== 'function') {
+          publish({ status: 'unavailable', reason: 'no-fetch' })
+          return
+        }
+        publish({ status: 'loading' })
+        try {
+          const res = await fetch(API_PATH, { headers: { accept: 'application/json' } })
+          const body = await res.json().catch(() => ({}))
+          if (!res.ok || body?.ok !== true) throw new Error(body?.error || `HTTP ${res.status}`)
+          accept(body)
+        } catch (error) {
+          publish({ status: 'unavailable', reason: `api: ${error?.message ?? error}` })
+        }
+      }
+      return {
+        kind: 'api',
+        getSnapshot: () => snapshot,
+        start: () => {
+          if (started) return
+          started = true
+          load()
+        },
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+        set: async (field, value) => {
+          const res = await fetch(API_PATH, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ set: { [field]: value } }),
+          })
+          const body = await res.json().catch(() => ({}))
+          if (!res.ok || body?.ok !== true) throw new Error(body?.error || `HTTP ${res.status}`)
+          accept(body)
+        },
+      }
+    }
+
+    /**
+     * 绑一个**可写的**设置域。导出（经 __test）以便离线测试。
+     *
+     * 两代 DSH 对"这个插件的设置"用的 key 不一样：
+     *   0.1.5-rc.3：settings 命名空间 —— `qq-bridge`（宿主半 register 出来的）；
+     *   0.2.0     ：profile **entry id** —— `include:qq-bridge`（由插件自己的 Config 投影而来）。
+     * 只绑前者的话，0.2.0 上永远拿到 `unavailable`，用户看到的就是"这个部署没有为 qq-bridge
+     * 提供可写的设置服务"（2026-10-01 桌面端真机）。所以**两个都绑、谁 ready 用谁**；
+     * **全都不 ready** 时再退到宿主自己的本机接口（0.2.0 的兜底，见 createApiScope）。
+     */
     function bindSettings(service) {
-      const unavailable = { status: 'unavailable' }
+      const unavailable = UNAVAILABLE_SNAPSHOT
       const candidates = []
       // 0.2.0 的表单 key 到底叫什么，源码里能看到的写法**全试一遍**（谁 ready 用谁）：
       // settings 命名空间 / profile entry id / 包名，以及带 include: 前缀的两种。
@@ -541,23 +631,38 @@ window.__ModuleLoader__.load({
           return unavailable
         }
       }
-      const ready = () => candidates.find((candidate) => snapshotOf(candidate).status !== 'unavailable')
+      const readyScope = () => candidates.find((candidate) => snapshotOf(candidate).status === 'ready')
+      const anyLoading = () => candidates.some((candidate) => snapshotOf(candidate).status === 'loading')
+      const api = createApiScope()
       return {
         // 供排障/测试看：这次到底绑到了哪些 key
         namespaces: candidates.map((candidate) => candidate.namespace),
+        /** 这次数据从哪来（排障/测试用）：'scope' | 'api' | 'none'。 */
+        via: () => {
+          if (readyScope()) return 'scope'
+          return api.getSnapshot().status === 'ready' ? 'api' : 'none'
+        },
         /**
          * 每个候选的当前状态。直接显示在卡片上 —— 0.2.0 的 key 叫什么，
          * 与其猜，不如让它自己报（2026-10-01 真机就是靠这个收敛的）。
          */
-        detail: () =>
-          candidates.length === 0
-            ? '一个候选都没绑上（webUiSettings.bind 全部抛错）'
-            : candidates
-                .map((candidate) => `${candidate.namespace}=${snapshotOf(candidate).status}`)
-                .join('、'),
+        detail: () => {
+          const scopes =
+            candidates.length === 0
+              ? '一个候选都没绑上（webUiSettings.bind 全部抛错）'
+              : candidates.map((candidate) => `${candidate.namespace}=${snapshotOf(candidate).status}`).join('、')
+          const apiSnap = api.getSnapshot()
+          return `${scopes}；本机接口=${apiSnap.status}${apiSnap.reason ? `（${apiSnap.reason}）` : ''}`
+        },
         getSnapshot: () => {
-          const candidate = ready() ?? candidates[0]
-          return candidate ? snapshotOf(candidate) : unavailable
+          const candidate = readyScope()
+          if (candidate) return snapshotOf(candidate)
+          // scope 全不可用 → 退到宿主本机接口；第一次问就把它跑起来。
+          if (!anyLoading()) api.start()
+          const apiSnap = api.getSnapshot()
+          if (apiSnap.status === 'ready') return apiSnap
+          if (apiSnap.status === 'loading' || apiSnap.status === 'idle') return LOADING_SNAPSHOT
+          return unavailable
         },
         subscribe: (listener) => {
           const offs = []
@@ -569,16 +674,17 @@ window.__ModuleLoader__.load({
               // 订阅失败不影响其它候选
             }
           }
+          offs.push(api.subscribe(listener))
+          if (!readyScope() && !anyLoading()) api.start()
           return () => {
             for (const off of offs) off()
           }
         },
         set: (field, value) => {
-          const candidate = ready() ?? candidates[0]
-          if (!candidate || typeof candidate.scope.set !== 'function') {
-            throw new Error('qq-bridge: 没有可写的设置源')
-          }
-          return candidate.scope.set(field, value)
+          const candidate = readyScope()
+          if (candidate && typeof candidate.scope.set === 'function') return candidate.scope.set(field, value)
+          if (api.getSnapshot().status === 'ready') return api.set(field, value)
+          throw new Error('qq-bridge: 没有可写的设置源')
         },
       }
     }

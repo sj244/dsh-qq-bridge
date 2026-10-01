@@ -285,6 +285,14 @@ export function apply(ctx, config) {
   const legacySettings = hasLegacySettings(settingsService)
 
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  /**
+   * 用户设置的落盘位置（0.2.0 专用）。
+   * 0.2.0 的宿主设置桥不给第三方插件可写域（见 docs/dsh-0.2.0-migration.md），
+   * 所以照抄 @linxin666/dsh-client-ui-skin-center 的做法：自己挂一条**只服务本机**的接口，
+   * 值写在自己的文件里。优先级：本文件 > composition config（见 readSettings）。
+   * 放在 statePath 同一个目录，测试里天然落在临时目录。
+   */
+  const settingsPath = join(dirname(config.statePath || join(home, 'qq-bridge-state.json')), 'qq-bridge-settings.json')
   if (!legacySettings) {
     logger.warn(
       '这个宿主没有 settings.register（0.2.0 起设置表单从插件 Config 派生）：' +
@@ -334,11 +342,15 @@ export function apply(ctx, config) {
     // 新模型（0.2.0）：没有命名空间，**config 本身就是用户改过的值**。
     let stored
     if (legacySettings) {
+      // 0.1.5：用户层在 settings 命名空间里（设置界面写它）。
       try {
         stored = ctx.settings.get(NS)
       } catch {
         stored = undefined
       }
+    } else {
+      // 0.2.0：设置桥拿不到可写域 → 用户改的值在我们自己的文件里（由设置接口写入）。
+      stored = readSettingsFile()
     }
     const s = { ...(stored ?? {}) }
     return {
@@ -372,6 +384,124 @@ export function apply(ctx, config) {
       onebotPort: Math.max(1, Math.min(65535, Number(s.onebotPort ?? config.onebotPort ?? 3001))),
       qqNumber: String(s.qqNumber ?? config.qqNumber ?? '').trim(),
     }
+  }
+
+  // ── 自己那层设置（0.2.0 专用：本机 HTTP 接口 + 自己的文件）──────────────────
+  //
+  // 为什么不直接用宿主 settings：0.2.0 的 `webUiSettings` 桥对第三方插件永远返回
+  // `unavailable`（证据与复现见 docs/dsh-0.2.0-migration.md）。范本：皮肤中心
+  // `@linxin666/dsh-client-ui-skin-center` —— `inject: ["webServer"]` + 自己的 `/api/...`
+  // + 自己落盘，全程不碰宿主 settings 服务。
+
+  /** 文件缓存（按 mtime 失效）：readSettings 在热路径上，别每次都读盘。 */
+  let settingsFileCache = { mtimeMs: -1, values: {} }
+
+  function readSettingsFile() {
+    try {
+      const st = statSync(settingsPath)
+      if (st.mtimeMs === settingsFileCache.mtimeMs) return settingsFileCache.values
+      const raw = JSON.parse(readFileSync(settingsPath, 'utf8'))
+      const values = raw && typeof raw === 'object' && raw.values && typeof raw.values === 'object' ? raw.values : {}
+      settingsFileCache = { mtimeMs: st.mtimeMs, values }
+      return values
+    } catch {
+      // 文件不存在/坏了都当"没有覆盖"，回落到 config。
+      settingsFileCache = { mtimeMs: -1, values: {} }
+      return {}
+    }
+  }
+
+  function writeSettingsFile(values) {
+    mkdirSync(dirname(settingsPath), { recursive: true })
+    const tmp = `${settingsPath}.tmp`
+    writeFileSync(tmp, `${JSON.stringify({ version: 1, values }, null, 2)}\n`, 'utf8')
+    renameSync(tmp, settingsPath)
+    settingsFileCache = { mtimeMs: -1, values: {} } // 让下次读取重新加载
+  }
+
+  /** 只认 schema 里有的键 —— 接口不写白名单之外的任何东西。 */
+  function knownSettingKeys() {
+    return new Set(Object.keys(BridgeSettings?.dict ?? {}))
+  }
+
+  function sendJson(res, status, payload) {
+    const body = JSON.stringify(payload)
+    res.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-length': Buffer.byteLength(body),
+    })
+    res.end(body)
+  }
+
+  /** 只服务本机：这个接口能改设置，不能暴露给局域网 / 远程 GUI。 */
+  function isLoopback(req) {
+    const addr = String(req?.socket?.remoteAddress ?? '')
+    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+  }
+
+  async function readRequestBody(req, limit = 64 * 1024) {
+    const chunks = []
+    let size = 0
+    for await (const chunk of req) {
+      size += chunk.length
+      if (size > limit) throw new Error('body too large')
+      chunks.push(chunk)
+    }
+    return Buffer.concat(chunks).toString('utf8')
+  }
+
+  /**
+   * `/api/qq-bridge/settings` —— 设置卡片在 0.2.0 上的数据源。
+   *
+   * - `GET`  → `{ ok, values（生效值，含 config 回落）, overridden（用户显式设过的键） }`
+   * - `POST` → `{ set?: {...}, unset?: [...] }`：先过 schema 校验，再写文件，
+   *   最后跑一遍副作用（传输重连 / 用法说明重挂）。
+   *
+   * 非本机请求一律 403；只写 schema 白名单里的键。
+   */
+  async function handleSettingsRequest(req, res) {
+    if (!isLoopback(req)) {
+      logger.warn(`设置接口拒绝了非本机请求（${req?.socket?.remoteAddress ?? '?'}）`)
+      return sendJson(res, 403, { ok: false, error: 'loopback-only' })
+    }
+    if (req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, values: readSettings(), overridden: Object.keys(readSettingsFile()) })
+    }
+    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
+
+    let payload
+    try {
+      payload = JSON.parse((await readRequestBody(req)) || '{}')
+    } catch (error) {
+      return sendJson(res, 400, { ok: false, error: `bad-json: ${error?.message ?? error}` })
+    }
+    const patch = payload?.set && typeof payload.set === 'object' ? payload.set : null
+    const unset = Array.isArray(payload?.unset) ? payload.unset.map(String) : []
+    if (!patch && unset.length === 0) return sendJson(res, 400, { ok: false, error: 'set-or-unset-required' })
+
+    const known = knownSettingKeys()
+    const next = { ...readSettingsFile() }
+    try {
+      // 走一遍 schema：非法值（比如 wakeProbability 写成 "abc"）在这里就被拦下。
+      const validate = typeof BridgeSettings === 'function' ? BridgeSettings : (v) => v
+      const merged = validate({ ...readSettings(), ...(patch ?? {}) })
+      for (const key of Object.keys(patch ?? {})) {
+        if (known.has(key)) next[key] = merged[key]
+      }
+    } catch (error) {
+      return sendJson(res, 400, { ok: false, error: String(error?.message ?? error) })
+    }
+    for (const key of unset) if (known.has(key)) delete next[key]
+
+    try {
+      writeSettingsFile(next)
+    } catch (error) {
+      return sendJson(res, 500, { ok: false, error: `write-failed: ${error?.message ?? error}` })
+    }
+    // 改完立刻生效：地址变了要重连、出站方式变了要重挂提示词。
+    applySettingChanges()
+    return sendJson(res, 200, { ok: true, values: readSettings(), overridden: Object.keys(next) })
   }
 
   // ── state (最近聊天缓冲 / 唤醒日志 / 出站采集 / 出站目的地) ──────────────────
@@ -1338,10 +1468,9 @@ export function apply(ctx, config) {
 
   // 只有「地址 / token 引用」变了才重连；改昵称、唤醒概率之类不该把连接掐了。
   let lastTransportKey = `${readSettings().onebotUrl}\u0000${readSettings().accessTokenEnv}`
-  // `settings/updated` 是老模型（settings 命名空间）的事件；0.2.0 没有它 ——
-  // 那边的配置变更由 loader 重新下发（插件会带着新 config 重跑）。
-  if (legacySettings) ctx.on('settings/updated', guarded('settings/updated', (ns) => {
-    if (String(ns) !== NS) return
+
+  /** 设置变了之后的副作用：用法说明重挂 + 传输重连。老模型的 settings 事件与本机接口共用。 */
+  function applySettingChanges() {
     const s = readSettings()
 
     // 出站方式是**开关**，而系统提示词正文是**挂载那一刻的快照** —— 改了它必须重挂，
@@ -1360,7 +1489,40 @@ export function apply(ctx, config) {
     lastTransportKey = key
     logger.info('onebot 配置变了，重连')
     transport.reconnectNow()
+  }
+
+  // `settings/updated` 是老模型（settings 命名空间）的事件；0.2.0 没有它 ——
+  // 那边的配置变更由设置接口自己触发（applySettingChanges）。
+  if (legacySettings) ctx.on('settings/updated', guarded('settings/updated', (ns) => {
+    if (String(ns) !== NS) return
+    applySettingChanges()
   }))
+
+  // 0.2.0：宿主设置桥写不了 → 自己挂一条**只服务本机**的设置接口（范本：皮肤中心的 /api/skin-center/...）。
+  // 可选注入：没有 webServer 服务的部署照常工作（只是卡片仍拿不到可写域）。
+  // （`ctx.inject` 是 Cordis 核心 API，真实宿主一定有；容错只是为了让不带它的极简测试桩也能跑。）
+  if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (scoped) => {
+    const server = scoped?.webServer
+    if (!server || typeof server.register !== 'function') return
+    try {
+      const dispose = server.register({
+        kind: 'exact',
+        path: '/api/qq-bridge/settings',
+        handler: handleSettingsRequest,
+      })
+      scoped.effect(() => () => {
+        try {
+          dispose()
+        } catch {
+          // 卸载时路由可能已经不在了，忽略
+        }
+      })
+      logger.info('设置接口已挂载：/api/qq-bridge/settings（仅本机）')
+    } catch (error) {
+      logger.warn(`设置接口挂载失败（可能同路径已被占用）：${error?.message ?? error}`)
+    }
+  })
+
 
   // ── 出站：目标会话的回复 → QQ ────────────────────────────────────────────────
 

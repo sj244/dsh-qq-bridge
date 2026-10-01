@@ -25,6 +25,9 @@ let fakeAgent = null
 // 恢复会话那条用例会塞这两个：假 sessionQuery + 捕获 resume 收到的参数
 let fakeSessionQuery = null
 let lastResumeOptions = null
+/** 宿主半挂出来的 HTTP 路由（webServer 假实现收集用）。 */
+const capturedRoutes = []
+
 const ctx = {
   logger: { info() {}, warn: (m) => warnings.push(String(m)) },
   settings: {
@@ -46,6 +49,15 @@ const ctx = {
   },
   effect: () => {},
   get: (name) => (name === 'sessionQuery' ? fakeSessionQuery : undefined),
+}
+// 真实 Cordis ctx 一定有 ctx.inject（可选注入用它）；假 ctx 也补上，
+// 这样「设置接口」那条路能被离线测到。
+ctx.inject = (_deps, cb) => cb(ctx)
+ctx.webServer = {
+  register: (route) => {
+    capturedRoutes.push(route)
+    return () => {}
+  },
 }
 
 const config = {
@@ -750,6 +762,55 @@ if (sim) {
           typeof none.detail === 'function' ? none.detail() : 'no detail',
         )
 
+        // ★ 0.2.0 的兜底：scope 全不可用 → 走宿主自己挂的本机接口（fetch 打桩验证）。
+        {
+          const calls = []
+          sandbox.fetch = async (url, init) => {
+            calls.push({ url: String(url), method: init?.method ?? 'GET' })
+            const values = { nicknames: init?.method === 'POST' ? ['y'] : ['x'] }
+            return { ok: true, status: 200, json: async () => ({ ok: true, values, overridden: ['nicknames'] }) }
+          }
+          const apiScope = bindSettings({
+            bind: () => ({
+              getSnapshot: () => ({ status: 'unavailable' }),
+              subscribe: () => () => {},
+              set: async () => {},
+            }),
+          })
+          check('诊断里同时报 scope 与接口状态', String(apiScope.detail()).includes('本机接口='), apiScope.detail())
+          check('scope 全不可用时先报 loading（并已在拉接口）', apiScope.getSnapshot().status === 'loading')
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          const ready = apiScope.getSnapshot()
+          check(
+            '接口返回后 snapshot=ready，且带 value/user/writable（卡片不用改）',
+            ready.status === 'ready' &&
+              ready.writable === true &&
+              ready.value?.nicknames?.[0] === 'x' &&
+              ready.user?.nicknames === true,
+            JSON.stringify(ready),
+          )
+          check('via() 报 api', apiScope.via() === 'api')
+          await apiScope.set('nicknames', ['y'])
+          check(
+            'set 走 POST 到 /api/qq-bridge/settings',
+            calls.some((c) => c.method === 'POST' && c.url.includes('/api/qq-bridge/settings')),
+            JSON.stringify(calls),
+          )
+          check(
+            '接口不可用（没有 fetch）时如实报 unavailable，不炸',
+            (() => {
+              const saved = sandbox.fetch
+              delete sandbox.fetch
+              const noFetch = bindSettings({ bind: () => ({ getSnapshot: () => ({ status: 'unavailable' }) }) })
+              noFetch.getSnapshot()
+              const snap = noFetch.getSnapshot()
+              sandbox.fetch = saved
+              return snap.status === 'unavailable' || snap.status === 'loading'
+            })(),
+          )
+        }
+
+
         check('set 在没有可写源时明确抛错', (() => {
           try {
             none.set('nicknames', ['a'])
@@ -918,7 +979,87 @@ if (sim) {
   )
 }
 
+// 0.2.0 的设置接口：宿主 settings 桥拿不到可写域时的数据源
+// （范本：@linxin666/dsh-client-ui-skin-center 的 /api/skin-center/...）。
+// 只有**非 legacy**（0.2.0 形态）的宿主才走设置文件那条路，所以要单独 mount 一个假 ctx。
+{
+  check('legacy 宿主上也挂了设置路由（可选注入不炸）', capturedRoutes.some((r) => r.path === '/api/qq-bridge/settings'))
+
+  const apiRoutes = []
+  const apiCtx = {
+    ...ctx,
+    settings: { describe: () => [], update: async () => {}, configure: () => () => {} }, // 非 legacy
+    webServer: { register: (route) => { apiRoutes.push(route); return () => {} } },
+  }
+  apiCtx.inject = (_deps, cb) => cb(apiCtx)
+  apply(apiCtx, config)
+
+  const route = apiRoutes.find((r) => r.path === '/api/qq-bridge/settings')
+  check('非 legacy 宿主：挂上 /api/qq-bridge/settings（exact）', route?.kind === 'exact' && typeof route.handler === 'function')
+
+  const makeRes = () => {
+    const out = { status: 0, body: '' }
+    return { out, writeHead: (status) => { out.status = status }, end: (body) => { out.body = String(body ?? '') } }
+  }
+  const req = (method, { addr = '127.0.0.1', body } = {}) => ({
+    method,
+    url: '/api/qq-bridge/settings',
+    socket: { remoteAddress: addr },
+    async *[Symbol.asyncIterator]() {
+      if (body !== undefined) yield Buffer.from(JSON.stringify(body))
+    },
+  })
+
+  if (route) {
+    const res1 = makeRes()
+    await route.handler(req('GET'), res1)
+    const got = JSON.parse(res1.out.body)
+    check(
+      'GET 200：返回生效值（含 config 回落）',
+      res1.out.status === 200 && got.ok === true && got.values?.targetSessionId === 'session-smoke',
+      res1.out.body.slice(0, 120),
+    )
+
+    const res2 = makeRes()
+    await route.handler(req('GET', { addr: '10.0.0.9' }), res2)
+    check('非本机请求 403（接口能改设置，绝不能外露）', res2.out.status === 403, String(res2.out.status))
+
+    const res3 = makeRes()
+    await route.handler(req('POST', { body: { set: { nicknames: ['a', 'b'], wakeProbability: 0.5 } } }), res3)
+    const wrote = JSON.parse(res3.out.body)
+    check(
+      'POST 写进设置文件并立即生效',
+      res3.out.status === 200 &&
+        wrote.ok === true &&
+        wrote.values?.wakeProbability === 0.5 &&
+        JSON.stringify(wrote.values?.nicknames) === '["a","b"]',
+      res3.out.body.slice(0, 160),
+    )
+    check('overridden 列出被用户显式设过的键（卡片据此标「已覆盖」）', Array.isArray(wrote.overridden) && wrote.overridden.includes('nicknames'))
+
+    const res4 = makeRes()
+    await route.handler(req('POST', { body: { set: { notAKnownKey: 1 } } }), res4)
+    const unknown = JSON.parse(res4.out.body)
+    check('白名单外的键不会被写进去', unknown.overridden?.includes('notAKnownKey') !== true, JSON.stringify(unknown.overridden))
+
+    const res5 = makeRes()
+    await route.handler(req('POST', { body: { set: { wakeProbability: 'abc' } } }), res5)
+    check('非法值被 schema 拦下（400）', res5.out.status === 400, `${res5.out.status} ${res5.out.body.slice(0, 80)}`)
+
+    const res6 = makeRes()
+    await route.handler(req('POST', { body: { unset: ['nicknames'] } }), res6)
+    const cleared = JSON.parse(res6.out.body)
+    check(
+      'unset 能清掉覆盖（回落到 config）',
+      res6.out.status === 200 && JSON.stringify(cleared.values?.nicknames) === JSON.stringify(config.nicknames),
+      res6.out.body.slice(0, 160),
+    )
+    check('读到的 overridden 已不含被清掉的键', cleared.overridden?.includes('nicknames') !== true, JSON.stringify(cleared.overridden))
+  }
+}
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
+
 
 if (warnings.length) console.log('warnings:', warnings.slice(0, 5))
 process.exit(failed === 0 ? 0 : 1)

@@ -97,17 +97,32 @@ if (legacy) {
 （`dsh-at-file/lib/index.js:15892  ctx.settings.register(AT_FILE_NAMESPACE, …)`）——
 两个失败的插件用同一个"0.2.0 已删除"的方法，这比单看我们的栈更硬。
 
+## 更正（2026-10-01 晚）：不是"所有插件设置都坏了"
+
+用户发现**皮肤中心**（`@linxin666/dsh-client-ui-skin-center@0.4.4`）在同一个 0.2.0 桌面端上
+设置界面**完全可用**（开关 / 滑条 / 按钮 / 校验按钮都在，能改能存）。查了它的实现：
+
+| 层 | 做法 |
+|---|---|
+| 包声明 | **同时**有 `dsh.bundle`（宿主半）与 `dsh.client`（浏览器半） |
+| 宿主半 | `const inject = ["webServer"]` + `ctx.webServer.register(route)` 挂自己的 `/api/skin-center/...`；配置自己 `readFileSync`/`writeFileSync` 落盘 |
+| 浏览器半 | 直接 `fetch("/api/skin-center/we/inventory")` / `fetch(WE_API + path, …)`，**不碰宿主 settings 服务** |
+
+**准确结论**：坏的是**「宿主 `settings` 服务 →（`webUiSettings` 桥）→ 表单」这条路**
+（我们的卡片与 dsh-pet 都走它）；**自带 UI + 自己持久化**的插件（皮肤中心、创意工坊、使用统计）不受影响。
+这也解释了官方「插件列表」里没有可编辑字段 —— Config 表单走的是同一条断掉的路。
+
 ## TODO（0.2.0 相关，按优先级）
 
-- [ ] **等平台把第三方插件的设置桥接上**（首选，无需我们改代码）。
-      0.2.0 + web-all 0.4.4 上**所有**第三方插件的设置表单都失效：
-      `dsh-pet` 的卡片显示"当前 DSH 版本未向设置页暴露本插件的配置命名空间"，
-      和我们 `bindSettings.detail()` 报的 `unavailable` 是同一根因。
-      平台修好后我们的卡片会**自动恢复**（`bindSettings` 已经会挑 ready 的那个 key）。
-      **恢复判据**：卡片诊断行出现 `<某个 key>=ready`。
-- [ ] **（可选）自建 client↔host 设置通道**：宿主注册一个只读写本插件 config 的 API
-      （typert lookup 或 API controller），客户端卡片读写走它。
-      能立刻让 GUI 可用，但属于**重复实现平台能力**，平台修好后应删除。先评估成本再决定。
+- [x] **自建设置通道 —— 已实现**（2026-10-01）：照抄皮肤中心 ——
+      宿主半可选注入 `webServer`（`ctx.inject(['webServer'], …)`），`ctx.webServer.register()` 挂
+      `/api/qq-bridge/settings`（GET 读 / POST 写，非 loopback 403，只写 schema 白名单）；
+      值存 `$DSH_HOME/qq-bridge-settings.json`（`readSettings()` 优先级 = 设置文件 > composition config）；
+      浏览器半在拿不到可写域时自动改走它（`createApiScope()`，快照形状与宿主 scope 对齐，卡片没改）。
+      离线测试覆盖：GET/POST/403/白名单/非法值/`unset` + 客户端 `via()==='api'`。
+- [ ] **等平台修设置桥**（现在只是"锦上添花"：平台修好后 `bindSettings` 会自动优先用 scope，
+      我们那条本机接口可以留着也可以删）。
+
 - [ ] **精简诊断**：`client/client.js` 的 `bindSettings.detail()` 与卡片上那行「诊断：…」是排障用的；
       平台恢复后可去掉卡片上的那行（`namespaces` / `detail()` 建议保留，排障很有用）。
 - [ ] **README 补一句**：README「设置界面与全部设置项」一节在 0.2.0 上目前**不适用**
@@ -117,5 +132,6 @@ if (legacy) {
 - [ ] **桌面端沙箱 ACL**：本机桌面端在这个工作区上跑命令会失败
       （`SetNamedSecurityInfoW failed (Win32 5): grantWrite(F:\游戏视频回放\DSH工作区)`），
       切成 `danger-full-access` 才正常。已写进给 DSH 的反馈，等官方确认是否已知问题。
+
 
 

@@ -21,6 +21,11 @@
 - **兼容 DSH 0.2.0 的消息格式 v4**：v4 废弃了 `source.kind === 'plugin'`（`assertV4MessageSources` 直接抛
   "requires a producer-owned source kind"），导致 QQ 唤醒的轮次整个失败。注入消息的 source 改为按宿主分叉：
   0.1.5 用老包装、0.2.0 用 producer-owned 的 `{ kind: 'plugin:dsh-qq-bridge' }`（`injectedMessageSource()`，导出可测）。
+- **0.2.0 上设置卡片可用了（自建设置通道）**：0.2.0 的宿主设置桥对第三方插件不给可写域（#677 迁移未完成），
+  于是照抄生态里真正能用的做法（皮肤中心）：宿主半**可选**注入 `webServer`，挂一条**只服务本机**的
+  `GET/POST /api/qq-bridge/settings`；值存 `$DSH_HOME/qq-bridge-settings.json`
+  （优先级：设置文件 > composition config）；浏览器半在拿不到可写域时自动改走这个接口。
+  非 loopback 请求一律 403，只写 schema 白名单里的键。0.1.5 与 0.2.0 上都能改设置了。
 
 
 
