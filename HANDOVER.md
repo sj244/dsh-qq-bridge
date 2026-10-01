@@ -738,6 +738,16 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 > `settings.section { id: 'plugins', order: 15 }`）持有，官方只读清单注册 `id: 'all'`。
 > 我们两条都注入（`slots.inject` 只在 slot 存在时才跑 factory，包一层 try 兜"slot 不存在就抛错"的实现），
 > 哪个存在哪个生效 —— `test-smoke.mjs` 有断言盯着"两个 slot 都注入了"。
+>
+> **服务名也换了**（这是**第二处**，用户 2026-10-01 指出）：0.1.5-rc.3 的客户端设置服务叫 `settingsScope`，
+> 0.2.0 叫 `webUiSettings`。只 inject 旧服务名的话，0.2.0 上回调永远不跑，slot 双注册全白费 ——
+> 现在**两扇门各 inject 一次**（`ctx.inject(['settingsScope'], …)` + `ctx.inject(['webUiSettings'], …)`，
+> 用 `registered` 闸门防重复注册，门里再用 `ctx.get` 互相兜底）。
+> **两个服务的 API 一致**：`bind({ namespace })` 之后同样是 `getSnapshot() / set() / subscribe()`
+> （卡片只用这三个）。活参考：`~/.dsh/profiles/web/.dsh-module-fallback/node_modules/@linxin666/dsh-pet/lib/client.js`
+> 里写着 `(ctx.get('webUiSettings') ?? ctx.settingsScope).bind({ namespace })`。
+> **`platform: 'web'` 也确认没问题**：那批能在 0.2.0 上跑起来的社区插件声明的都是 `"platform": "web"`。
+
 
 **为什么必须做它**：DSH 的「设置 → 插件 → 插件配置」是**按设置命名空间派发卡片**的 ——
 它把「宿主注册了哪些命名空间」与「哪些卡片声明了这些 key」取交集。

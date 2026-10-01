@@ -286,9 +286,9 @@ QQ 的"拍一拍"在 OneBot 里走的是 **notice 事件**，**不是消息段**
 1. `package.json` 里的 `dsh.client` 还在；
 2. **重启过 `dsh web`** —— 浏览器半的内容是启动时读盘并算指纹的，改完必须重启；
 3. **重启之后刷新过页面（F5）** —— 清单是页面加载时注入的，只重启服务器的话，已经打开的页面手里还是旧清单；
-4. DSH 版本：**0.2.0 把插件配置页的挂载点换了** —— 0.1.5 是 `settings.plugin.item`（按 settings 命名空间派发），
-   0.2.0 是 `settings.plugins.tab`（插件自己是一个 tab）。本插件**向两个 slot 各注册一次**，
-   所以两版都能显示；只有当你自己改过注册代码时才需要留意别把新的删了。
+4. DSH 版本：**0.2.0 换了两处名字** —— 客户端设置服务 `settingsScope` → `webUiSettings`，
+   插件配置页的挂载点 `settings.plugin.item` → `settings.plugins.tab`（插件自己是一个 tab）。
+   本插件**两个服务门、两个 slot 各注册一次**，哪个存在哪个生效，所以 0.1.5-rc.3 与 0.2.0 都能显示卡片。
 
 > 卡片按 settings 命名空间派发，`client/client.js` 里的 key 必须逐字等于 `qq-bridge`，
 > 对不上不会报错、只是静默不显示（`test-smoke.mjs` 有断言盯着这个一致性）。

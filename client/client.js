@@ -527,8 +527,12 @@ window.__ModuleLoader__.load({
         registerCard('settings.plugin.item', { key: NS })
         registerCard('settings.plugins.tab', { id: NS, order: 100, label: () => 'QQ 桥接' })
       }
-      ctx.inject(['settingsScope'], (scoped) => setup(scoped.settingsScope, scoped))
-      ctx.inject(['webUiSettings'], (scoped) => setup(scoped.webUiSettings, scoped))
+      // 每扇门里再互相兜一下（社区插件 `@linxin666/*` 的写法是 `ctx.get('webUiSettings') ?? ctx.settingsScope`）：
+      // 万一某版本两个服务都在、或名字以后又微调，两条路都拿得到；`registered` 闸门保证只注册一次。
+      // 两个服务的 **API 一致**：`bind({ namespace })` 之后同样是 `getSnapshot() / set() / subscribe()`
+      // （本卡片只用这三个），活参考见 `@linxin666/dsh-pet/lib/client.js`。
+      ctx.inject(['settingsScope'], (scoped) => setup(scoped.settingsScope ?? scoped.get?.('webUiSettings'), scoped))
+      ctx.inject(['webUiSettings'], (scoped) => setup(scoped.webUiSettings ?? scoped.get?.('settingsScope'), scoped))
     }
 
     exports.apply = apply
