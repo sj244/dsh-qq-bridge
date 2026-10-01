@@ -729,6 +729,16 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 
 ## 15. 浏览器半：设置界面里的那张卡片（M3）
 
+> **2026-10-01 更新：0.2.0 换了挂载点，两个 slot 都要注册。**
+> DSH **0.2.0-rc.2** 起，插件配置页不再是 `settings.plugin.item`（按 settings 命名空间派发），
+> 而是插件**自己的一个 tab**：`ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+> name: 'settings.plugins.tab', id, order, label }, Cell))`。
+> `settings.plugins.tab` 是 `kind: 'list'`、`scope: 'root'` 的列表 slot；
+> 导航项与 tab 外壳由内置「插件」页（`dsh-client-ui-settings-plugins`，注册
+> `settings.section { id: 'plugins', order: 15 }`）持有，官方只读清单注册 `id: 'all'`。
+> 我们两条都注入（`slots.inject` 只在 slot 存在时才跑 factory，包一层 try 兜"slot 不存在就抛错"的实现），
+> 哪个存在哪个生效 —— `test-smoke.mjs` 有断言盯着"两个 slot 都注入了"。
+
 **为什么必须做它**：DSH 的「设置 → 插件 → 插件配置」是**按设置命名空间派发卡片**的 ——
 它把「宿主注册了哪些命名空间」与「哪些卡片声明了这些 key」取交集。
 宿主半注册了 `qq-bridge` 命名空间，但没有浏览器半 → **交集为空 → 界面上什么都不出现**。
@@ -786,7 +796,7 @@ window.__ModuleLoader__.load({
 | 恢复默认 | `scope.unset(field)`；`snapshot.user` 里**存在该字段**即「已被覆盖」 |
 | 会话下拉的数据源 | `ctx.sessions.list`（`ids[]` + `byId[id].displayTitle`）＋ `ctx.sessions.refresh()` |
 | **过滤归档会话** | `ctx.workspaces.list.getSnapshot().archivedSessionIds`（workspace 域的归档集；不下拉归档的会话） |
-| 注册卡片 | `ctx.slots.register({ name: 'settings.plugin.item', key: 'qq-bridge' }, Cell)` |
+| 注册卡片 | 0.1.5-rc.3：`ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({ name, key: 'qq-bridge' }, Cell))`；0.2.0：同样注入 `settings.plugins.tab`，注册 `{ name, id: 'qq-bridge', order, label }`。两个都注入，哪个存在哪个生效 |
 
 > ⚠️ **最容易踩的一条**：卡片 `key` 必须**逐字等于**宿主注册的 settings 命名空间。
 > 不一致不会报错，界面上就是静默什么都不出现。`test-smoke.mjs` 有断言盯着这个一致性

@@ -669,12 +669,16 @@ if (sim) {
     )
 
     const cards = []
+    const slotInjects = []
     const fakeCtx = {
       get: () => undefined,
       inject: (_deps, cb) => cb(fakeCtx),
       settingsScope: { bind: () => ({}) },
       slots: {
-        inject: (_name, cb) => cb(),
+        inject: (name, cb) => {
+          slotInjects.push(name)
+          return cb()
+        },
         register: (options, cell) => {
           cards.push({ options, cell })
           return () => {}
@@ -682,13 +686,31 @@ if (sim) {
       },
     }
     mod.apply(fakeCtx)
-    check('apply 注册了一张卡片', cards.length === 1, String(cards.length))
+    // ★ 两版 DSH 都要能显示：0.1.5-rc.3 的挂载点是 settings.plugin.item，
+    //   0.2.0 改成了 settings.plugins.tab（插件自己是一个 tab）。
+    //   真的 slots.inject 只在那个 slot 存在时才跑 factory，所以两个都注入是安全的。
     check(
-      '卡片 name / key 正确（key 必须等于宿主 settings 命名空间）',
-      cards[0]?.options?.name === 'settings.plugin.item' && cards[0]?.options?.key === NS,
-      JSON.stringify(cards[0]?.options),
+      '同时向新旧两个 slot 注入（兼容 0.1.5-rc.3 与 0.2.0）',
+      slotInjects.includes('settings.plugin.item') && slotInjects.includes('settings.plugins.tab'),
+      JSON.stringify(slotInjects),
     )
-    check('卡片渲染函数可调用', typeof cards[0]?.cell === 'function' && Boolean(cards[0].cell()))
+    check('两个 slot 各自的卡片都注册了', cards.length === 2, String(cards.length))
+    const oldCard = cards.find((c) => c.options.name === 'settings.plugin.item')
+    const newCard = cards.find((c) => c.options.name === 'settings.plugins.tab')
+    check(
+      '0.1.5-rc.3 的卡片：key 必须等于宿主 settings 命名空间',
+      oldCard?.options?.key === NS,
+      JSON.stringify(oldCard?.options),
+    )
+    check(
+      '0.2.0 的 tab：id / order / label 齐全',
+      newCard?.options?.id === NS &&
+        typeof newCard?.options?.order === 'number' &&
+        typeof newCard?.options?.label === 'function' &&
+        String(newCard.options.label()).length > 0,
+      JSON.stringify(newCard?.options),
+    )
+    check('卡片渲染函数可调用', cards.every((c) => typeof c.cell === 'function' && Boolean(c.cell())))
 
     // ★ 卡片必须覆盖**每一个** settings 键 —— 用户报的「设置里配不了 visionModel」就是这个：
     // 它在 Schema 里有、卡片 FIELDS 里却没做输入框 → 用户根本改不到。这条断言专防它。

@@ -497,19 +497,29 @@ window.__ModuleLoader__.load({
       // 设置域不在时不要报错：等它出现再注册（Cordis 的 ctx.inject 是响应式的）。
       ctx.inject(['settingsScope'], (scoped) => {
         const scope = scoped.settingsScope.bind({ namespace: NS })
-        scoped.slots.inject('settings.plugin.item', () =>
-          scoped.slots.register(
-            {
-              name: 'settings.plugin.item',
-              key: NS,
-              // 卡片按 settings 命名空间派发：key 不对 = 界面上什么都不出现。
-            },
-            // sessionsOf 用「取的时候再解析」而不是现在取一次：
-            // sessions 服务可能比本插件晚出现，也可能这个部署根本没装 —— 那时卡片照常渲染，
-            // 只是目标会话那一栏只有一个兜底项，而不是整张卡片消失。
-            () => h(Card, { scope, sessionsOf: () => ctx.get('sessions'), workspacesOf: () => ctx.get('workspaces') }),
-          ),
-        )
+        // sessionsOf 用「取的时候再解析」而不是现在取一次：
+        // sessions 服务可能比本插件晚出现，也可能这个部署根本没装 —— 那时卡片照常渲染，
+        // 只是目标会话那一栏只有一个兜底项，而不是整张卡片消失。
+        const card = () =>
+          h(Card, { scope, sessionsOf: () => ctx.get('sessions'), workspacesOf: () => ctx.get('workspaces') })
+
+        // ⚠️ 两个 slot 都注册 —— **DSH 0.2.0 换了插件配置页的挂载点**（2026-10-01）：
+        //   0.1.5-rc.3：`settings.plugin.item`，**按 settings 命名空间派发**，key 必须等于 NS；
+        //               对不上不会报错，只是界面上什么都不出现。
+        //   0.2.0     ：`settings.plugins.tab`，插件**自己就是设置页里的一个 tab**
+        //               （形状 `{ id, order, label }`；导航项与 tab 外壳由内置「插件」页持有）。
+        // `slots.inject(slot, factory)` 只在那个 slot 存在时才跑 factory，所以多注入一个是安全的；
+        // 外面再包一层 try：万一某个版本对"slot 不存在"直接抛错，也不能让整个浏览器半挂掉。
+        const registerCard = (slot, options) => {
+          try {
+            scoped.slots.inject(slot, () => scoped.slots.register({ ...options, name: slot }, card))
+          } catch (error) {
+            // 这个版本的 DSH 没有这个 slot —— 忽略，另一个会生效。
+            console?.debug?.(`qq-bridge: slot ${slot} unavailable (${error?.message ?? error})`)
+          }
+        }
+        registerCard('settings.plugin.item', { key: NS })
+        registerCard('settings.plugins.tab', { id: NS, order: 100, label: () => 'QQ 桥接' })
       })
     }
 
