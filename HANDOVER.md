@@ -597,6 +597,13 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
   兼容 `notify+poke` / `poke` / `group_poke` / `friend_poke` 四种写法；自己戳自己直接忽略（防回环）。
 - `decide()`：`poke && atSelf` → `wake/poke`（与 @ 同级，必唤醒；`atOnlyInGroup` 那道闸门也放行）。
 - 其它 notice 记一条 `未适配的 notice：notice_type=… sub_type=…`，方便照真实 payload 继续补。
+- ⚠️ **出站 poke（主动戳人）暂不提供**（2026-10-01 决定）：本机 NapCat 4.18.28 的 PacketBackend
+  **不支持当前的 QQ 9.9.36-53644**，三条发送路径全试过（`send_poke` / `group_poke` / `poke` 消息段），
+  分别报 `packetBackend发包能力不可用` 和 `1200 消息体无法解析`。
+  要恢复只有两条路：**换成 PacketBackend 支持的 QQ**（官方 release 推荐 40768–44343）或等 NapCat 支持新版 QQ。
+  **完整实现留在本地分支 `poke-tool-wip`（未推送）**：`qq_bridge_poke` 工具 + `outboundGate()` 复用 +
+  `pokeFailureHint()` 失败翻译 + 相关测试。
+
 
 ### 13.3 图片：缓存 + 多模态描述（两步缺一不可）
 - **落盘缓存**：`$DSH_HOME/qq-bridge-images/`，收到即下载（纯 I/O 不调模型），
@@ -623,7 +630,7 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 
 | 节 | 管什么 |
 |---|---|
-| 你会看到什么 | 入站格式、未唤醒摘要、「[图片]：<描述>」（就地）可能不准、别当绝对事实 |
+| 你会看到什么 | 入站格式、未唤醒摘要、「[图片]：<描述>」（就地）可能不准、被戳显示成「[戳一戳]（戳的是我）」、别当绝对事实 |
 | 怎么把话说回 QQ | 只有标记块里的内容会发；开标记**独占行首**；给自己看的写在块外 |
 | 群聊礼仪 | 一两句人话、不刷屏、不放路径/代码/日志/命令/配置值/提交号/过程汇报、不装做过 |
 | **无人值守：不要碰特权操作** | 见 §14 |

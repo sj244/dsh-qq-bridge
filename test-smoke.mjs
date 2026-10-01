@@ -378,6 +378,7 @@ if (sim) {
   )
   check('用法说明：截断阈值跟着 replyMaxChars 走', p.includes('1200 字'), p.slice(0, 80))
   check('用法说明：明确「回群只用标记块，别拿 send 工具当回复通道」', p.includes('qq_bridge_send') && p.includes('别拿它当回复通道'))
+  check('用法说明：说明被戳会显示成「[戳一戳]（戳的是我）」', p.includes('[戳一戳]') && p.includes('戳的是我'))
 }
 
 // 出站方式是**开关**（replyMode）：marker / tool / always —— 提示词与出站路径都要跟着变
