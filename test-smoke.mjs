@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, inlineImageNotes, labelForSegment, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -762,6 +762,28 @@ if (sim) {
   check('digest 与入站各自对齐（不会串号）', inlineImageNotes('缓冲 [图片]', [i1], d) + inlineImageNotes('本条 [图片]', [i2], d) === '缓冲 [图片]：一只猫本条 [图片]：一张卡牌：攻击力 3')
 }
 
+// 戳一戳：OneBot 里它是 notice 事件（不是消息段），以前会被静默丢掉（2026-10-01 用户要求适配）
+{
+  const me = '3082276036'
+  const pokeMe = mapOneBotNotice(
+    { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: 3097206157, target_id: 3082276036, group_id: 770156738 },
+    me,
+  )
+  check('戳我 → 合成入站、atSelf 且带 poke 标记', !!pokeMe && pokeMe.atSelf === true && pokeMe.poke === true, JSON.stringify(pokeMe))
+  check('戳我 → 正文是 [戳一戳] 占位符', String(pokeMe && pokeMe.text).includes('[戳一戳]'))
+  check('戳我 → 群号与操作者都留着', !!pokeMe && pokeMe.groupId === '770156738' && pokeMe.userId === '3097206157')
+  const pokeOther = mapOneBotNotice(
+    { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: 3097206157, target_id: 111111, group_id: 770156738 },
+    me,
+  )
+  check('戳别人 → 进策略但不当 atSelf（只记录）', !!pokeOther && pokeOther.atSelf !== true)
+  check('自己戳自己 → 忽略（防回环）', mapOneBotNotice({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: me, target_id: me }, me) === null)
+  check('别的 notice 不误判', mapOneBotNotice({ post_type: 'notice', notice_type: 'group_recall' }, me) === null)
+  check('非 notice 一律不接', mapOneBotNotice({ post_type: 'message' }, me) === null)
+  check('兼容 group_poke / friend_poke 写法', !!mapOneBotNotice({ post_type: 'notice', notice_type: 'group_poke', user_id: '1', target_id: me, group_id: 2 }, me))
+}
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
+
 if (warnings.length) console.log('warnings:', warnings.slice(0, 5))
 process.exit(failed === 0 ? 0 : 1)

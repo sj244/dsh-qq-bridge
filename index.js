@@ -185,6 +185,41 @@ export function inlineImageNotes(text, images, descById) {
   })
 }
 
+/**
+ * 戳一戳 → 合成入站消息。导出是为了可测试。
+ *
+ * ⚠️ 在 OneBot v11 里戳一戳是 **notice 事件**（`notice_type: 'notify'` + `sub_type: 'poke'`），
+ * **不是消息段** —— 早先只处理 `post_type === 'message'`，所以被戳等于没被戳（2026-10-01 用户要求适配）。
+ * 兼容几种写法：v11 的 `notify+poke`，以及部分实现直接给的 `poke` / `group_poke` / `friend_poke`。
+ *
+ * 只有**戳我**才算"叫我一声"（`atSelf: true`，与 @ 同级必唤醒）；戳别人照样进策略、但只记录。
+ * 返回 null = 不是戳一戳 / 自己戳自己（防回环）/ 不是 notice。
+ */
+export function mapOneBotNotice(event, selfId) {
+  if (!event || event.post_type !== 'notice') return null
+  const type = String(event.notice_type ?? '')
+  const sub = String(event.sub_type ?? '')
+  const isPoke =
+    (type === 'notify' && sub === 'poke') || type === 'poke' || type === 'group_poke' || type === 'friend_poke'
+  if (!isPoke) return null
+  const me = selfId === undefined || selfId === null ? '' : String(selfId)
+  const operator = event.user_id === undefined || event.user_id === null ? '' : String(event.user_id)
+  const target = event.target_id === undefined || event.target_id === null ? '' : String(event.target_id)
+  if (me !== '' && operator === me) return null // 自己戳自己：忽略
+  const pokedMe = me !== '' && target === me
+  const sender = event.sender ?? {}
+  return {
+    userId: operator || null,
+    nickname: sender.card || sender.nickname || null,
+    groupId: event.group_id === undefined || event.group_id === null ? null : String(event.group_id),
+    groupName: null,
+    text: pokedMe ? '[戳一戳]（戳的是我）' : '[戳一戳]',
+    atSelf: pokedMe,
+    poke: true,
+    images: [],
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function apply(ctx, config) {
@@ -367,6 +402,9 @@ export function apply(ctx, config) {
     if (listeningActive(msg)) return { action: 'wake', reason: 'listening' }
     // M2：群里的额外闸门 —— 没被 @ 就完全不处理（比概率唤醒更严）。
     if (msg.groupId && s.atOnlyInGroup && msg.atSelf !== true) return { action: 'drop', reason: 'group-not-at' }
+    // 戳一戳（notice 事件合成的入站）：戳的是我 = 和"@ 我"同级，必唤醒；
+    // 戳别人只是记录 —— 跟"叫了别人的名字"一样，不该把我叫起来。
+    if (msg.poke === true && msg.atSelf === true) return { action: 'wake', reason: 'poke' }
     if (msg.atSelf === true) return { action: 'wake', reason: 'at-mention' }
     if (mentionsNickname(msg.text, s.nicknames)) return { action: 'wake', reason: 'nickname' }
     if (random() < s.wakeProbability) return { action: 'wake', reason: 'probability' }
@@ -995,6 +1033,12 @@ export function apply(ctx, config) {
     // 元事件只用来观察连接健康（心跳），不进策略。
     if (event.post_type === 'meta_event') return
 
+    // 戳一戳走的是 **notice** 事件（不是消息段）—— 只认 `message` 的话，被戳会被静默丢掉。
+    if (event.post_type === 'notice') {
+      await handleNotice(event)
+      return
+    }
+
     // 自身消息防回环：message_sent 是我们自己发的；user_id === self_id 同理。
     if (event.post_type === 'message_sent') return
     if (event.post_type !== 'message') return
@@ -1019,6 +1063,26 @@ export function apply(ctx, config) {
         : await loadGroupName(inbound.groupId)
     }
 
+    await handleInbound(inbound)
+  }
+
+  /**
+   * notice 事件 → 入站。目前只适配戳一戳；其它 notice 只记一条日志（**不静默吞掉**），
+   * 方便照真实 payload 继续补。
+   * 与消息走**同一个** `handleInbound`：白名单、唤醒策略、渲染、出站闸门全部复用。
+   */
+  async function handleNotice(event) {
+    const selfId = readSettings().selfId || transport.status().selfId || ''
+    const inbound = mapOneBotNotice(event, selfId)
+    if (!inbound) {
+      logger.info(`未适配的 notice：notice_type=${event.notice_type ?? '?'} sub_type=${event.sub_type ?? '?'}`)
+      return
+    }
+    if (inbound.groupId) {
+      inbound.groupName = groupNames.has(inbound.groupId)
+        ? groupNames.get(inbound.groupId)
+        : await loadGroupName(inbound.groupId)
+    }
     await handleInbound(inbound)
   }
 
@@ -1883,6 +1947,7 @@ export function buildUsagePrompt(s = {}) {
     '- 入站消息形如「[QQ · 群名] 昵称：内容」；私聊时地点写成「私聊」。',
     '- 你没被唤醒期间的聊天会攒成一段「[QQ 未唤醒期间聊天记录] … [记录结束]」摘要，附在消息前面。',
     '- 图片由多模态模型先转成文字，**就地**贴在图片原来的位置上，形如「[图片]：<描述>」—— 描述可能不准，别当成绝对事实。',
+    '- 被「戳一戳」会显示成「[戳一戳]（戳的是我）」—— 那和被人 @ 一样，是有人在叫你。',
     '',
     '【怎么把话说回 QQ】',
     // 出站方式是**开关**（replyMode），提示词必须跟着变 —— 否则会教模型一个在本部署里

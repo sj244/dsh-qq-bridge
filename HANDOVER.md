@@ -589,6 +589,15 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 现在：单条入站 4000 / 单条进缓冲 500 / 整段摘要 1200 字符，超长都带 `…（已截断）`；
 摘要从最新往回装，装不下丢更早的并注明省略条数。摘要默认取最近 **8** 条。
 
+### 13.2b 戳一戳（notice 事件，2026-10-01 用户要求适配）
+- OneBot v11 里戳一戳是 **notice 事件**（`notice_type: 'notify'` + `sub_type: 'poke'`），**不是消息段** ——
+  早先只处理 `post_type === 'message'`，被戳会被**静默丢掉**（群里戳了没反应）。
+- `mapOneBotNotice(event, selfId)`（模块级导出，便于测试）把它**合成一条入站**：
+  正文 `[戳一戳]（戳的是我）`、`atSelf: true`、`poke: true`；戳别人 → `atSelf: false`，只记录。
+  兼容 `notify+poke` / `poke` / `group_poke` / `friend_poke` 四种写法；自己戳自己直接忽略（防回环）。
+- `decide()`：`poke && atSelf` → `wake/poke`（与 @ 同级，必唤醒；`atOnlyInGroup` 那道闸门也放行）。
+- 其它 notice 记一条 `未适配的 notice：notice_type=… sub_type=…`，方便照真实 payload 继续补。
+
 ### 13.3 图片：缓存 + 多模态描述（两步缺一不可）
 - **落盘缓存**：`$DSH_HOME/qq-bridge-images/`，收到即下载（纯 I/O 不调模型），
   超 64MB / 300 张按 mtime 淘汰最旧；缓冲项存**本地路径**而不是 URL → 不怕 QQ 图片 URL 过期。
