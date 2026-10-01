@@ -56,6 +56,21 @@ export function hasLegacySettings(service) {
   return typeof service?.register === 'function' && typeof service?.get === 'function'
 }
 const PLUGIN_TAG = 'qq-bridge'
+/** 包名（v4 消息格式里 producer 归属用）。 */
+const PACKAGE = 'dsh-qq-bridge'
+
+/**
+ * 注入消息用的 source，按宿主能力分叉（导出以便测试）。
+ *
+ * DSH 0.2.0 的消息格式 v4 **废弃了 `{ kind: 'plugin', plugin }` 包装**：
+ * `assertV4MessageSources` 会对 `kind === 'plugin'` 直接抛
+ * "format v4 message requires a producer-owned source kind"（真机 2026-10-01，QQ 唤醒的轮次整个失败）。
+ * 正确形状是 producer-owned 的 `{ kind: 'plugin:<包名>' }`（= 格式迁移里 `producerKind()`
+ * 对未知第三方插件产出的结果）。0.1.5 仍是 v3，保留老写法。
+ */
+export function injectedMessageSource(legacy) {
+  return legacy ? { kind: 'plugin', plugin: PLUGIN_TAG } : { kind: `plugin:${PACKAGE}` }
+}
 /** 包名：与 `client/client.js` 里 `__ModuleLoader__.load({id})` 的值必须一致。 */
 const PACKAGE_NAME = 'dsh-qq-bridge'
 const MAX_BUFFER = 200
@@ -696,7 +711,8 @@ export function apply(ctx, config) {
   function makeMessage(text, extraBlocks = []) {
     return createUserMessage({
       content: [{ type: 'text', text }, ...extraBlocks],
-      source: { kind: 'plugin', plugin: PLUGIN_TAG },
+      // v4（0.2.0）拒绝 `kind:'plugin'`；按宿主能力写 producer-owned 形状（见 injectedMessageSource）。
+      source: injectedMessageSource(legacySettings),
     })
   }
 
@@ -1446,7 +1462,7 @@ export function apply(ctx, config) {
       // ⚠️ 两个条件都要：`mine` 是"认出来了"（消息 id / 正文前缀），`plugin === PLUGIN_TAG`
       // 是"来源字段还老实"时的兜底。**少任何一个都会哑火** —— 写这段时我先把后者删了，
       // 测试立刻挂了 8 条（真实链路里前缀一定匹配，但别把正确性押在"一定"上）。
-      if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG)) {
+      if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG) || kind === `plugin:${PACKAGE}`) {
         pendingFromQQ = true
         effect = 'pending=true（我们自己注入的 QQ 消息）'
       } else if (kind === 'user') {

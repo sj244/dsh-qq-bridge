@@ -88,6 +88,10 @@ if (legacy) {
 - 回归断言 4 条进 `test-smoke.mjs`：0.2.0 形状的 settings 服务上 `apply()` **不抛错**、且**不再调 register**。
 - 真机验收标准：重启桌面端后 `plugin_manager list_plugins` 里 `include:qq-bridge` 的 `fiberPhase`
   必须是 **`active`**（修前是 `failed`）；插件页应出现自动生成的设置表单。
+- **又一处（消息格式 v4）**：0.2.0 废弃 `source.kind === 'plugin'`（`assertV4MessageSources` 抛
+  "requires a producer-owned source kind"，QQ 唤醒轮次整个失败）。注入消息 source 改为按宿主分叉：
+  0.1.5 `{kind:'plugin', plugin}` / 0.2.0 `{kind:'plugin:dsh-qq-bridge'}`（`injectedMessageSource()` 导出可测）。
+
 
 **旁证补充**：同批 `failed` 的 `dsh-at-file` 也调了同一个被删的 API
 （`dsh-at-file/lib/index.js:15892  ctx.settings.register(AT_FILE_NAMESPACE, …)`）——

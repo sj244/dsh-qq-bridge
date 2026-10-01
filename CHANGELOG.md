@@ -18,6 +18,9 @@
   老宿主维持命名空间，新宿主直接读 entry 配置并 `configure({ auto: true })` 生成页面。
   顺带修掉 `readSettings()` 里若干字段没回落 `config` 的隐患（新模型下会悄悄丢用户配置）。
   客户端卡片也**两个可写设置 key 都绑**（0.1.5 的 `qq-bridge` vs 0.2.0 的 `include:qq-bridge`），谁 ready 用谁。
+- **兼容 DSH 0.2.0 的消息格式 v4**：v4 废弃了 `source.kind === 'plugin'`（`assertV4MessageSources` 直接抛
+  "requires a producer-owned source kind"），导致 QQ 唤醒的轮次整个失败。注入消息的 source 改为按宿主分叉：
+  0.1.5 用老包装、0.2.0 用 producer-owned 的 `{ kind: 'plugin:dsh-qq-bridge' }`（`injectedMessageSource()`，导出可测）。
 
 
 

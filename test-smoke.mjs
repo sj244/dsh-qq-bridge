@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -891,6 +891,13 @@ if (sim) {
     hasLegacySettings({ describe: () => [], update: async () => {} }) === false,
   )
   check('hasLegacySettings：没有服务也判新模型（不炸）', hasLegacySettings(undefined) === false)
+  check('0.1.5 注入 source 用老的 plugin 包装', injectedMessageSource(true).kind === 'plugin')
+  check(
+    '0.2.0 注入 source 用 producer-owned（plugin:包名）',
+    injectedMessageSource(false).kind === 'plugin:dsh-qq-bridge',
+    JSON.stringify(injectedMessageSource(false)),
+  )
+  check('0.2.0 的 source.kind 不是已废弃的 plugin', injectedMessageSource(false).kind !== 'plugin')
 
   const before = registeredSettings.length
   const newModelCtx = {
