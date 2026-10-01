@@ -1255,6 +1255,13 @@ export function apply(ctx, config) {
   let turnActive = false
   /** 注入时对"下一轮"的直接认领（只可能由我们自己的注入置位，比 pending 权威）。 */
   let claimedFromQQ = false
+  /**
+   * 「非 QQ 轮二次确认」状态：本轮已经回过一次"确认要发吗"。
+   * `turn/start` 与 `turn/end` 都清零，所以它严格属于**某一轮**，绝不会跨轮生效。
+   * 用户 2026-10-01 提议：工具模式下不是 QQ 发起的，第一次调用只回问一句，
+   * 同一轮里**再调一次**才真的发 —— 能力不丢，误发依然要跨过一道有意识的动作。
+   */
+  let nonQQConfirmPending = false
 
   /**
    * 最近一次注入的 QQ 消息 id —— 用来**认出**「这条 user/message 就是我们自己灌进去的」。
@@ -1304,6 +1311,8 @@ export function apply(ctx, config) {
       //（早先这里无条件取 pending —— 一旦 pending 被同轮里的别的消息污染（harness 上下文）就哑火。）
       currentTurnFromQQ = claimedFromQQ || pendingFromQQ
       claimedFromQQ = false
+      // 新一轮：非 QQ 轮的"二次确认"清零（否则上一轮的确认会跨轮生效）。
+      nonQQConfirmPending = false
       return
     }
 
@@ -1361,6 +1370,7 @@ export function apply(ctx, config) {
       currentTurnFromQQ = false
       turnActive = false
       claimedFromQQ = false
+      nonQQConfirmPending = false
       if (!raw) return
 
       // 闸门的第一道：**只发 QQ 唤醒的那一轮**。DSH 界面里聊出来的标记块一个字都不发。
@@ -1552,7 +1562,8 @@ export function apply(ctx, config) {
     name: 'qq_bridge_send',
     description:
       '把一条消息发到 QQ（默认发给最后一次入站的目的地）。' +
-      '**只有被 QQ 唤醒的那一轮才发得出去**：在 DSH 界面里直接对话时调用会被拒绝并说明原因。' +
+      '**只有被 QQ 唤醒的那一轮才直接发得出去**：在 DSH 界面里直接对话时，第一次调用只会回一句' +
+      '"本轮不是 QQ 发起的，确认要发吗"，同一轮里再调一次才真的发出去。' +
       'replyMode=tool 时这是唯一的出站方式；marker 模式下它是「直接发这一条」的旁路。' +
       '发出去的内容会记进 outbox（via: tool）。',
     parameters: {
@@ -1562,13 +1573,22 @@ export function apply(ctx, config) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
     async execute(args) {
-      // 来源闸门：不是 QQ 唤醒的那一轮，一个字都不发，并且**明确告诉模型原因**。
+      // 来源闸门（2026-10-01 起是**二次确认**，不再是硬拒绝）：
+      // 不是 QQ 唤醒的那一轮，第一次调用只回一句"确认要发吗"、**一个字都不发**；
+      // 同一轮里再调一次才真的发出去。DSH 侧依然不会误发（多跨一道有意识的动作），
+      // 但同时保住了"我确实想让你发到 QQ"这条能力 —— 以前是彻底发不出去。
       if (!currentTurnFromQQ) {
-        return JSON.stringify({
-          sent: 0,
-          refused: true,
-          reason: '本轮不是 QQ 唤醒的（这条消息来自 DSH 界面），所以没有发到 QQ。用普通回复即可，不需要这个工具。',
-        }, null, 2)
+        if (!nonQQConfirmPending) {
+          nonQQConfirmPending = true
+          return JSON.stringify({
+            sent: 0,
+            needsConfirm: true,
+            reason:
+              '本轮不是 QQ 唤醒的（这条消息来自 DSH 界面），所以**这次没有发**。' +
+              '确实要发到 QQ 的话：**再调用一次本工具**就会发出去；不想发就别再调，正常回复即可。',
+          }, null, 2)
+        }
+        logger.info('非 QQ 轮：二次确认通过，按确认发送')
       }
       const dest = args.groupId
         ? { kind: 'group', groupId: String(args.groupId) }
@@ -1580,6 +1600,8 @@ export function apply(ctx, config) {
         recordOutbox({
           sessionId: 'tool:qq_bridge_send',
           via: 'tool',
+          // 非 QQ 轮的"确认后发送"要在台账里留痕，事后一眼看出这不是 QQ 唤醒的那一轮发的。
+          nonQQTurn: !currentTurnFromQQ,
           to: result?.destination ?? dest ?? state.lastDestination,
           text: args.text,
         })
@@ -1870,7 +1892,8 @@ export function buildUsagePrompt(s = {}) {
           '当前是 **tool 模式**：回群要调 `qq_bridge_send` 工具，把要说的话当参数发出去。',
           '**标记块在这个模式下不生效**（写了也不会发出去），不要用。',
           '不调工具就一个字都不会发。给自己看的分析、命令、路径、结论写在正文里就行（正文不出口）。',
-          '⚠️ **不是 QQ 唤醒的那一轮，这个工具会被拒绝**并告诉你原因 —— 那种时候正常回答即可。',
+          '⚠️ **不是 QQ 唤醒的那一轮**（消息来自 DSH 界面）时，工具第一次调用**只会回你一句确认**、不会发出去；',
+          '  确实要发到 QQ 就**再调一次**（那时才真的发），不想发就别再调，正常回答即可。',
         ]
       : mode === 'always'
         ? [

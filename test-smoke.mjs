@@ -415,16 +415,29 @@ if (sim) {
   fire('turn/end', { reason: { kind: 'completed' } })
   check('tool 模式：标记块不出站（开关把它关了）', !sawText(await outbox(), 'tool 模式下标记块应该无效'))
 
-  // 工具在 DSH 轮里被拒绝，并且**明确把原因回给模型**（这就是工具方案要的那个反馈回路）
+  // 工具在 DSH 轮里走**两步确认**：第一次只回问、一个字都不发；同一轮里再调一次才真的发。
+  // （2026-10-01 用户提议：硬拒绝太死，改成"确认后再发" —— 能力不丢，误发依然要跨一道有意识的动作。）
   fire('user/message', { source: { kind: 'user' } })
   start()
-  const refused = JSON.parse(await sendTool.execute({ text: '不该发出去' }))
+  const asked = JSON.parse(await sendTool.execute({ text: '第一次不该发出去' }))
   check(
-    '工具：DSH 轮里被拒绝且说明原因',
-    refused.refused === true && refused.sent === 0 && String(refused.reason).includes('DSH'),
-    JSON.stringify(refused),
+    '工具：DSH 轮第一次调用只回确认、不发送',
+    asked.needsConfirm === true && asked.sent === 0 && String(asked.reason).includes('DSH'),
+    JSON.stringify(asked),
   )
-  check('被拒绝的调用不记 outbox', !sawText(await outbox(), '不该发出去'))
+  check('第一次调用不记 outbox', !sawText(await outbox(), '第一次不该发出去'))
+  const confirmed = JSON.parse(await sendTool.execute({ text: '确认之后发出去' }))
+  check('工具：DSH 轮第二次调用真的发送', confirmed.refused !== true && lastText(await outbox()) === '确认之后发出去', JSON.stringify(confirmed))
+  const obNonQQ = await outbox()
+  check('非 QQ 轮的发送在 outbox 留痕（nonQQTurn）', obNonQQ[obNonQQ.length - 1]?.nonQQTurn === true, JSON.stringify(obNonQQ[obNonQQ.length - 1]))
+  fire('turn/end', { reason: { kind: 'completed' } })
+
+  // 确认状态**不能跨轮泄漏**：新一轮的第一次调用必须重新回问
+  fire('user/message', { source: { kind: 'user' } })
+  start()
+  const again = JSON.parse(await sendTool.execute({ text: '新一轮第一次' }))
+  check('确认状态不跨轮：新一轮第一次仍只回确认', again.needsConfirm === true, JSON.stringify(again))
+  check('跨轮也不该发出去', !sawText(await outbox(), '新一轮第一次'))
   fire('turn/end', { reason: { kind: 'completed' } })
 
   // 工具在 QQ 轮里走通，并记 outbox（via: tool）
