@@ -494,22 +494,28 @@ window.__ModuleLoader__.load({
     const inject = ['slots']
 
     function apply(ctx) {
-      // 设置域不在时不要报错：等它出现再注册（Cordis 的 ctx.inject 是响应式的）。
-      ctx.inject(['settingsScope'], (scoped) => {
-        const scope = scoped.settingsScope.bind({ namespace: NS })
+      // ⚠️ DSH 两代之间**两处都换了名字**（2026-10-01 用户指出第二处）：
+      //   ① 客户端**设置服务**：0.1.5-rc.3（web-all 0.3.x）叫 `settingsScope`，
+      //      0.2.0（web-all 0.4.x）叫 `webUiSettings`；
+      //   ② 插件配置页的**挂载 slot**：0.1.5-rc.3 是 `settings.plugin.item`（按 settings 命名空间派发），
+      //      0.2.0 是 `settings.plugins.tab`（插件自己是一个 tab）。
+      // 只 inject 旧服务名 = 0.2.0 上回调永远不跑（Cordis 的 inject 是响应式的，等不到就一直等），
+      // slot 再双注册也没用 —— 所以**服务门和 slot 都要各敲两遍**。
+      let registered = false
+      const setup = (service, scoped) => {
+        // 万一某个版本两个服务都在：只注册一次，别把卡片注册成两份。
+        if (registered) return
+        if (!service || typeof service.bind !== 'function') return
+        registered = true
+        const scope = service.bind({ namespace: NS })
         // sessionsOf 用「取的时候再解析」而不是现在取一次：
         // sessions 服务可能比本插件晚出现，也可能这个部署根本没装 —— 那时卡片照常渲染，
         // 只是目标会话那一栏只有一个兜底项，而不是整张卡片消失。
         const card = () =>
           h(Card, { scope, sessionsOf: () => ctx.get('sessions'), workspacesOf: () => ctx.get('workspaces') })
 
-        // ⚠️ 两个 slot 都注册 —— **DSH 0.2.0 换了插件配置页的挂载点**（2026-10-01）：
-        //   0.1.5-rc.3：`settings.plugin.item`，**按 settings 命名空间派发**，key 必须等于 NS；
-        //               对不上不会报错，只是界面上什么都不出现。
-        //   0.2.0     ：`settings.plugins.tab`，插件**自己就是设置页里的一个 tab**
-        //               （形状 `{ id, order, label }`；导航项与 tab 外壳由内置「插件」页持有）。
-        // `slots.inject(slot, factory)` 只在那个 slot 存在时才跑 factory，所以多注入一个是安全的；
-        // 外面再包一层 try：万一某个版本对"slot 不存在"直接抛错，也不能让整个浏览器半挂掉。
+        // slot 也各注册一遍：`slots.inject(slot, factory)` 只在那个 slot 存在时才跑 factory，
+        // 所以多注入一个是安全的；外面再包一层 try，兜住"slot 不存在就直接抛错"的实现。
         const registerCard = (slot, options) => {
           try {
             scoped.slots.inject(slot, () => scoped.slots.register({ ...options, name: slot }, card))
@@ -520,7 +526,9 @@ window.__ModuleLoader__.load({
         }
         registerCard('settings.plugin.item', { key: NS })
         registerCard('settings.plugins.tab', { id: NS, order: 100, label: () => 'QQ 桥接' })
-      })
+      }
+      ctx.inject(['settingsScope'], (scoped) => setup(scoped.settingsScope, scoped))
+      ctx.inject(['webUiSettings'], (scoped) => setup(scoped.webUiSettings, scoped))
     }
 
     exports.apply = apply

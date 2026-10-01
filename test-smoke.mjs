@@ -712,6 +712,32 @@ if (sim) {
     )
     check('卡片渲染函数可调用', cards.every((c) => typeof c.cell === 'function' && Boolean(c.cell())))
 
+    // ★ 第二个变化轴：**服务门也换了名字**。0.1.5-rc.3 是 settingsScope，0.2.0 是 webUiSettings。
+    //   只 inject 旧的那个，0.2.0 上回调永远不跑（用户 2026-10-01 抓出来的）。
+    {
+      const cards2 = []
+      const fakeCtx2 = {
+        get: () => undefined,
+        inject: (_deps, cb) => cb(fakeCtx2),
+        // 只给新服务名，没有 settingsScope —— 模拟 0.2.0（web-all 0.4.x）
+        webUiSettings: { bind: () => ({}) },
+        slots: {
+          inject: (_name, cb) => cb(),
+          register: (options, cell) => {
+            cards2.push({ options, cell })
+            return () => {}
+          },
+        },
+      }
+      mod.apply(fakeCtx2)
+      check('只有 webUiSettings 时也能注册（0.2.0 的服务名）', cards2.length === 2, String(cards2.length))
+      check(
+        '两个服务都在时只注册一次（不重复挂卡片）',
+        cards.length === 2 && cards2.length === 2,
+        `旧 ctx=${cards.length} 新 ctx=${cards2.length}`,
+      )
+    }
+
     // ★ 卡片必须覆盖**每一个** settings 键 —— 用户报的「设置里配不了 visionModel」就是这个：
     // 它在 Schema 里有、卡片 FIELDS 里却没做输入框 → 用户根本改不到。这条断言专防它。
     {
