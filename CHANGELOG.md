@@ -12,6 +12,14 @@
 - **兼容 DSH 0.2.0 的设置页**：0.2.0 换了**两处**名字 —— 客户端设置服务从 `settingsScope` 变成
   `webUiSettings`，插件配置页的挂载点从 `settings.plugin.item` 变成 `settings.plugins.tab`（插件自己是一个 tab）。
   插件现在**两个服务门、两个 slot 各注册一次**，哪个存在哪个生效，0.1.5-rc.3 与 0.2.0 都能显示设置卡片。
+- **兼容 DSH 0.2.0 的宿主设置模型**（真机修复）：0.2.0 删掉了 `settings.register/get`（DSH #677），
+  设置表单改为从插件自己的 `Config` 派生。老代码在 `apply()` 里无条件 `register` 会抛 TypeError →
+  **整条 fiber failed**（客户端半照样显示 tab，看起来就像"设置项全没了"）。现在按方法探测走两条路：
+  老宿主维持命名空间，新宿主直接读 entry 配置并 `configure({ auto: true })` 生成页面。
+  顺带修掉 `readSettings()` 里若干字段没回落 `config` 的隐患（新模型下会悄悄丢用户配置）。
+  客户端卡片也**两个可写设置 key 都绑**（0.1.5 的 `qq-bridge` vs 0.2.0 的 `include:qq-bridge`），谁 ready 用谁。
+
+
 
 
 

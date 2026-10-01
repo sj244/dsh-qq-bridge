@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
@@ -712,6 +712,55 @@ if (sim) {
     )
     check('卡片渲染函数可调用', cards.every((c) => typeof c.cell === 'function' && Boolean(c.cell())))
 
+    // ★ 第三个变化轴（2026-10-01 桌面端真机）：**可写设置域的 key 也换了**。
+    //   0.1.5 用 settings 命名空间 `qq-bridge`；0.2.0 用 profile entry id `include:qq-bridge`
+    //   （宿主 Config 投影出来的是后者）。只绑前者 → 0.2.0 上永远 unavailable，
+    //   用户看到"这个部署没有为 qq-bridge 提供可写的设置服务"。
+    {
+      const bindSettings = mod.__test?.bindSettings
+      check('bindSettings 已导出（便于测两代 key）', typeof bindSettings === 'function')
+      if (typeof bindSettings === 'function') {
+        const serviceReadyFor = (readyNs) => ({
+          bind: ({ namespace }) => ({
+            getSnapshot: () => ({
+              status: namespace === readyNs ? 'ready' : 'unavailable',
+              value: { nicknames: ['x'] },
+            }),
+            subscribe: () => () => {},
+            set: async () => {},
+          }),
+        })
+        const legacy = bindSettings(serviceReadyFor('qq-bridge'))
+        check(
+          '老宿主：绑 qq-bridge 拿到 ready',
+          legacy.getSnapshot().status === 'ready',
+          JSON.stringify(legacy.namespaces),
+        )
+        const modern = bindSettings(serviceReadyFor('include:qq-bridge'))
+        check(
+          '0.2.0：自动改用 include:qq-bridge（entry id）',
+          modern.getSnapshot().status === 'ready',
+          JSON.stringify(modern.namespaces),
+        )
+        const none = bindSettings({ bind: () => ({}) })
+        check('两代都拿不到时不炸、如实报 unavailable', none.getSnapshot().status === 'unavailable')
+        check(
+          '诊断信息列出试过的 key 与各自状态（真机排障用）',
+          typeof none.detail === 'function' && none.detail().includes('qq-bridge=unavailable'),
+          typeof none.detail === 'function' ? none.detail() : 'no detail',
+        )
+
+        check('set 在没有可写源时明确抛错', (() => {
+          try {
+            none.set('nicknames', ['a'])
+            return false
+          } catch {
+            return true
+          }
+        })())
+      }
+    }
+
     // ★ 第二个变化轴：**服务门也换了名字**。0.1.5-rc.3 是 settingsScope，0.2.0 是 webUiSettings。
     //   只 inject 旧的那个，0.2.0 上回调永远不跑（用户 2026-10-01 抓出来的）。
     {
@@ -830,6 +879,36 @@ if (sim) {
   check('别的 notice 不误判', mapOneBotNotice({ post_type: 'notice', notice_type: 'group_recall' }, me) === null)
   check('非 notice 一律不接', mapOneBotNotice({ post_type: 'message' }, me) === null)
   check('兼容 group_poke / friend_poke 写法', !!mapOneBotNotice({ post_type: 'notice', notice_type: 'group_poke', user_id: '1', target_id: me, group_id: 2 }, me))
+}
+
+// 回归（2026-10-01 桌面端真机）：DSH 0.2.0 的 settings 服务**没有 register/get**（#677），
+// 老代码在里面无条件调 register → apply() 抛错 → **fiber failed**；客户端半却照样进 boot graph，
+// 现象是"设置页有 tab、卡片说没有可写设置服务"。这几条断言专防它回来。
+{
+  check('hasLegacySettings：认得出老模型', hasLegacySettings({ register: () => {}, get: () => ({}) }) === true)
+  check(
+    'hasLegacySettings：0.2.0（只有 describe/update）判为新模型',
+    hasLegacySettings({ describe: () => [], update: async () => {} }) === false,
+  )
+  check('hasLegacySettings：没有服务也判新模型（不炸）', hasLegacySettings(undefined) === false)
+
+  const before = registeredSettings.length
+  const newModelCtx = {
+    ...ctx,
+    settings: { describe: () => [], update: async () => {}, configure: () => () => {} },
+  }
+  let threw = null
+  try {
+    apply(newModelCtx, config)
+  } catch (error) {
+    threw = error
+  }
+  check('0.2.0 的 settings（无 register/get）上 apply 不抛错', threw === null, String(threw))
+  check(
+    '0.2.0 上不再调用 settings.register（这是 fiber failed 的直接原因）',
+    registeredSettings.length === before,
+    `多调了 ${registeredSettings.length - before} 次`,
+  )
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)

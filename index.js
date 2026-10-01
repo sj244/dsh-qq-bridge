@@ -44,6 +44,17 @@ export const inject = ['agents', 'tools', 'settings']
 
 // 导出是为了让测试能断言「浏览器半的卡片 key」与它一致 —— 不一致的话界面上会静默什么都不出现。
 export const NS = 'qq-bridge'
+
+/**
+ * 这个宿主的 `settings` 服务是不是"老模型"（有 register/get）。导出以便测试。
+ *
+ * DSH #677 / 0.2.0 删掉了 register/get：设置表单改为从插件自己的 `Config` schema 派生。
+ * 判断必须**按方法探测**，不能按版本号 —— 老版本里 register 在，新版本里它只是没了；
+ * 而在 `apply()` 里直接调用它会让整条 fiber failed（客户端半却照样显示 tab，很难查）。
+ */
+export function hasLegacySettings(service) {
+  return typeof service?.register === 'function' && typeof service?.get === 'function'
+}
 const PLUGIN_TAG = 'qq-bridge'
 /** 包名：与 `client/client.js` 里 `__ModuleLoader__.load({id})` 的值必须一致。 */
 const PACKAGE_NAME = 'dsh-qq-bridge'
@@ -245,57 +256,98 @@ export function apply(ctx, config) {
   }
 
   // ── settings ───────────────────────────────────────────────────────────────
+  //
+  // 两代宿主的模型不同（DSH #677 / 0.2.0）：
+  //   0.1.5-rc.3：`settings` 有 register/get —— 插件**另开一个命名空间**存用户层设置，
+  //               客户端卡片按命名空间派发（`settings.plugin.item` + key = NS）。
+  //   0.2.0     ：register/get **已被删除**，表单改为从插件自己的 `Config` schema 派生，
+  //               宿主用 describe/update/replace/mutate 直接读写这个 entry 的配置。
+  // ⚠️ 在 0.2.0 上再无条件调 register，会在 `apply()` 里抛 TypeError → **整条 fiber failed**；
+  //    而客户端半因为包里声明了 `dsh.client` 照样进 boot graph，现象是"设置页有 tab、
+  //    卡片却说没有可写设置服务"（2026-10-01 桌面端真机）。同机型旁证：`dsh-at-file` 也调
+  //    register，同样 failed。所以这里**按方法探测**，不按版本号。
+  const settingsService = ctx.settings
+  const legacySettings = hasLegacySettings(settingsService)
 
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
-  ctx.settings.register(NS, BridgeSettings, {
-    base: {
-      targetSessionId: config.targetSessionId || '',
-      nicknames: config.nicknames ?? ['244'],
-      wakeProbability: config.wakeProbability ?? 0.05,
-      whitelist: config.whitelist ?? [],
-      groupWhitelist: config.groupWhitelist ?? [],
-      onebotUrl: config.onebotUrl ?? '',
-      accessTokenEnv: config.accessTokenEnv ?? '',
-      selfId: config.selfId ?? '',
-      replyWithQuote: config.replyWithQuote === true,
-      atOnlyInGroup: config.atOnlyInGroup === true,
-      stripMarkdown: config.stripMarkdown !== false,
-      replyMode: normalizeReplyMode(config.replyMode),
-      delivery: normalizeDelivery(config.delivery),
-      napcatInstallDir: config.napcatInstallDir ?? '',
-      napcatVersion: config.napcatVersion ?? '',
-      downloadProxy: config.downloadProxy ?? '',
-      onebotPort: config.onebotPort ?? 3001,
-      qqNumber: config.qqNumber ?? '',
-    },
-    applies: 'live',
-  })
+  if (!legacySettings) {
+    logger.warn(
+      '这个宿主没有 settings.register（0.2.0 起设置表单从插件 Config 派生）：' +
+        '设置请直接在「插件配置」页里改，值从 entry 配置读；本插件不再单独注册设置命名空间。',
+    )
+    // 新模型的入口：让这个 entry 自动生成设置页。
+    // ⚠️ 签名是 configure(presentation, owner = this.ctx.fiber) —— 不传 owner 会注册到
+    // settings 服务**自己的** fiber 上，等于没给我们的 entry 注册页面策略，describe() 里
+    // 就不会有 qq-bridge（真机上四种 key 全 unavailable 就是这么来的，2026-10-01）。
+    // TODO(0.2.0): 平台修好第三方插件的设置桥后这里可以简化；若届时客户端仍拿不到可写域，
+    // 再考虑自建 client↔host 设置通道（见 docs/dsh-0.2.0-migration.md 的 TODO 节）。
+    try {
+      settingsService?.configure?.({ auto: true }, ctx.fiber)
+    } catch (error) {
+      logger.warn(`settings.configure 失败：${error?.message ?? error}`)
+    }
+  }
+
+  if (legacySettings) {
+    ctx.settings.register(NS, BridgeSettings, {
+      base: {
+        targetSessionId: config.targetSessionId || '',
+        nicknames: config.nicknames ?? ['244'],
+        wakeProbability: config.wakeProbability ?? 0.05,
+        whitelist: config.whitelist ?? [],
+        groupWhitelist: config.groupWhitelist ?? [],
+        onebotUrl: config.onebotUrl ?? '',
+        accessTokenEnv: config.accessTokenEnv ?? '',
+        selfId: config.selfId ?? '',
+        replyWithQuote: config.replyWithQuote === true,
+        atOnlyInGroup: config.atOnlyInGroup === true,
+        stripMarkdown: config.stripMarkdown !== false,
+        replyMode: normalizeReplyMode(config.replyMode),
+        delivery: normalizeDelivery(config.delivery),
+        napcatInstallDir: config.napcatInstallDir ?? '',
+        napcatVersion: config.napcatVersion ?? '',
+        downloadProxy: config.downloadProxy ?? '',
+        onebotPort: config.onebotPort ?? 3001,
+        qqNumber: config.qqNumber ?? '',
+      },
+        applies: 'live',
+    })
+  }
 
   function readSettings() {
+    // 老模型：用户层在 settings 命名空间里，盖在 config（composition base）之上。
+    // 新模型（0.2.0）：没有命名空间，**config 本身就是用户改过的值**。
     let stored
-    try {
-      stored = ctx.settings.get(NS)
-    } catch {
-      stored = undefined
+    if (legacySettings) {
+      try {
+        stored = ctx.settings.get(NS)
+      } catch {
+        stored = undefined
+      }
     }
     const s = { ...(stored ?? {}) }
     return {
       targetSessionId: String(s.targetSessionId || config.targetSessionId || '').trim(),
-      nicknames: (s.nicknames ?? ['244']).map((n) => String(n)).filter((n) => n !== ''),
-      wakeProbability: clamp01(Number(s.wakeProbability ?? 0.05)),
-      whitelist: (s.whitelist ?? []).map(String),
-      groupWhitelist: (s.groupWhitelist ?? []).map(String),
-      attachRecentChat: s.attachRecentChat !== false,
-      recentChatLimit: Math.max(0, Math.min(200, Number(s.recentChatLimit ?? DEFAULT_RECENT_CHAT_LIMIT))),
-      replyMaxChars: Math.max(100, Number(s.replyMaxChars ?? 1500)),
+      // 下面每一行都必须回落到 `config`：新模型下用户的值就在 config 里，
+      // 只回落到硬编码默认值会把用户配置悄悄丢掉（如昵称、群白名单）。
+      nicknames: (s.nicknames ?? config.nicknames ?? ['244']).map((n) => String(n)).filter((n) => n !== ''),
+      wakeProbability: clamp01(Number(s.wakeProbability ?? config.wakeProbability ?? 0.05)),
+      whitelist: (s.whitelist ?? config.whitelist ?? []).map(String),
+      groupWhitelist: (s.groupWhitelist ?? config.groupWhitelist ?? []).map(String),
+      attachRecentChat: (s.attachRecentChat ?? config.attachRecentChat) !== false,
+      recentChatLimit: Math.max(
+        0,
+        Math.min(200, Number(s.recentChatLimit ?? config.recentChatLimit ?? DEFAULT_RECENT_CHAT_LIMIT)),
+      ),
+      replyMaxChars: Math.max(100, Number(s.replyMaxChars ?? config.replyMaxChars ?? 1500)),
       onebotUrl: String(s.onebotUrl ?? config.onebotUrl ?? '').trim(),
       accessTokenEnv: String(s.accessTokenEnv ?? config.accessTokenEnv ?? '').trim(),
       selfId: String(s.selfId ?? config.selfId ?? '').trim(),
-      replyWithQuote: s.replyWithQuote === true,
-      atOnlyInGroup: s.atOnlyInGroup === true,
-      stripMarkdown: s.stripMarkdown !== false,
-      replyMode: normalizeReplyMode(s.replyMode),
-      delivery: normalizeDelivery(s.delivery),
+      replyWithQuote: (s.replyWithQuote ?? config.replyWithQuote) === true,
+      atOnlyInGroup: (s.atOnlyInGroup ?? config.atOnlyInGroup) === true,
+      stripMarkdown: (s.stripMarkdown ?? config.stripMarkdown) !== false,
+      replyMode: normalizeReplyMode(s.replyMode ?? config.replyMode),
+      delivery: normalizeDelivery(s.delivery ?? config.delivery),
       visionModel: String(s.visionModel ?? config.visionModel ?? '').trim(),
       agentPreset: String(s.agentPreset ?? config.agentPreset ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
@@ -1270,7 +1322,9 @@ export function apply(ctx, config) {
 
   // 只有「地址 / token 引用」变了才重连；改昵称、唤醒概率之类不该把连接掐了。
   let lastTransportKey = `${readSettings().onebotUrl}\u0000${readSettings().accessTokenEnv}`
-  ctx.on('settings/updated', guarded('settings/updated', (ns) => {
+  // `settings/updated` 是老模型（settings 命名空间）的事件；0.2.0 没有它 ——
+  // 那边的配置变更由 loader 重新下发（插件会带着新 config 重跑）。
+  if (legacySettings) ctx.on('settings/updated', guarded('settings/updated', (ns) => {
     if (String(ns) !== NS) return
     const s = readSettings()
 

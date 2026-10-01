@@ -374,7 +374,22 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { style: S.sub },
-            '这个部署没有为 qq-bridge 提供可写的设置服务（settings 提供者没挂载，或连接处于内存模式）。设置仍然可以用 cordis.patch.yml 改。',
+            '这个部署没有为 qq-bridge 提供可写的设置服务（settings 提供者没挂载，或连接处于内存模式）。',
+          ),
+          h(
+            'div',
+            { style: S.hint },
+            '在 DSH 0.2.0（web-all 0.4.x）上，第三方插件的设置界面还没接上 —— 这是平台的已知缺口（DSH #677 的迁移未完成），不是本插件的问题。',
+          ),
+          h(
+            'div',
+            { style: S.hint },
+            '现在改设置：点右上角「打开配置文件」，在 profile 的 cordis.patch.yml 里加/改 `- id: qq-bridge` 的 config（字段名见 README「接入 QQ」一节），改完重启生效。',
+          ),
+          h(
+            'div',
+            { style: S.hint },
+            `诊断：${typeof scope.detail === 'function' ? scope.detail() : '（无诊断信息）'}`,
           ),
         )
       }
@@ -493,6 +508,81 @@ window.__ModuleLoader__.load({
     /** 需要的浏览器服务：slots（注册卡片）；settingsScope 在 apply 里等它出现。 */
     const inject = ['slots']
 
+    // TODO(0.2.0): 平台把第三方插件的设置桥接上之后（web-all / DSH 修完 #677 的迁移），
+    // 可以砍掉多余候选 key 与卡片上那行「诊断」；`namespaces` / `detail()` 建议保留（排障用）。
+    // 详见 docs/dsh-0.2.0-migration.md 的 TODO 节。
+    /**
+     * 绑一个**可写的**设置域。导出（经 __test）以便离线测试。
+     *
+     * 两代 DSH 对"这个插件的设置"用的 key 不一样：
+     *   0.1.5-rc.3：settings 命名空间 —— `qq-bridge`（宿主半 register 出来的）；
+     *   0.2.0     ：profile **entry id** —— `include:qq-bridge`（由插件自己的 Config 投影而来）。
+     * 只绑前者的话，0.2.0 上永远拿到 `unavailable`，用户看到的就是"这个部署没有为 qq-bridge
+     * 提供可写的设置服务"（2026-10-01 桌面端真机）。所以**两个都绑，谁 ready 用谁**。
+     */
+    function bindSettings(service) {
+      const unavailable = { status: 'unavailable' }
+      const candidates = []
+      // 0.2.0 的表单 key 到底叫什么，源码里能看到的写法**全试一遍**（谁 ready 用谁）：
+      // settings 命名空间 / profile entry id / 包名，以及带 include: 前缀的两种。
+      for (const namespace of [NS, `include:${NS}`, 'dsh-qq-bridge', 'include:dsh-qq-bridge']) {
+        try {
+          const scope = service.bind({ namespace })
+          if (scope && typeof scope === 'object') candidates.push({ namespace, scope })
+        } catch (error) {
+          // 某个候选绑不上不影响另一个。
+          console?.debug?.(`qq-bridge: bind(${namespace}) 失败：${error?.message ?? error}`)
+        }
+      }
+      const snapshotOf = (candidate) => {
+        try {
+          return candidate.scope.getSnapshot?.() ?? unavailable
+        } catch {
+          return unavailable
+        }
+      }
+      const ready = () => candidates.find((candidate) => snapshotOf(candidate).status !== 'unavailable')
+      return {
+        // 供排障/测试看：这次到底绑到了哪些 key
+        namespaces: candidates.map((candidate) => candidate.namespace),
+        /**
+         * 每个候选的当前状态。直接显示在卡片上 —— 0.2.0 的 key 叫什么，
+         * 与其猜，不如让它自己报（2026-10-01 真机就是靠这个收敛的）。
+         */
+        detail: () =>
+          candidates.length === 0
+            ? '一个候选都没绑上（webUiSettings.bind 全部抛错）'
+            : candidates
+                .map((candidate) => `${candidate.namespace}=${snapshotOf(candidate).status}`)
+                .join('、'),
+        getSnapshot: () => {
+          const candidate = ready() ?? candidates[0]
+          return candidate ? snapshotOf(candidate) : unavailable
+        },
+        subscribe: (listener) => {
+          const offs = []
+          for (const candidate of candidates) {
+            try {
+              const off = candidate.scope.subscribe?.(listener)
+              if (typeof off === 'function') offs.push(off)
+            } catch {
+              // 订阅失败不影响其它候选
+            }
+          }
+          return () => {
+            for (const off of offs) off()
+          }
+        },
+        set: (field, value) => {
+          const candidate = ready() ?? candidates[0]
+          if (!candidate || typeof candidate.scope.set !== 'function') {
+            throw new Error('qq-bridge: 没有可写的设置源')
+          }
+          return candidate.scope.set(field, value)
+        },
+      }
+    }
+
     function apply(ctx) {
       // ⚠️ DSH 两代之间**两处都换了名字**（2026-10-01 用户指出第二处）：
       //   ① 客户端**设置服务**：0.1.5-rc.3（web-all 0.3.x）叫 `settingsScope`，
@@ -507,7 +597,8 @@ window.__ModuleLoader__.load({
         if (registered) return
         if (!service || typeof service.bind !== 'function') return
         registered = true
-        const scope = service.bind({ namespace: NS })
+        // 两个 key 都绑，谁 ready 用谁（0.1.5 的命名空间 vs 0.2.0 的 entry id）。
+        const scope = bindSettings(service)
         // sessionsOf 用「取的时候再解析」而不是现在取一次：
         // sessions 服务可能比本插件晚出现，也可能这个部署根本没装 —— 那时卡片照常渲染，
         // 只是目标会话那一栏只有一个兜底项，而不是整张卡片消失。
@@ -542,7 +633,7 @@ window.__ModuleLoader__.load({
     exports.name = 'dsh-qq-bridge'
     // 纯函数给离线测试用（test-smoke.mjs 会在假 ctx 里真跑这个 bundle）。
     // Cordis 只认 apply / inject / name / Config，多余的导出它不管。
-    exports.__test = { sessionOptions, draftFrom, parse, fields: FIELDS }
+    exports.__test = { sessionOptions, draftFrom, parse, fields: FIELDS, bindSettings }
     return module.exports
   },
 })
