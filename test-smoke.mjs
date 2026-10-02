@@ -983,7 +983,10 @@ if (sim) {
 // （范本：@linxin666/dsh-client-ui-skin-center 的 /api/skin-center/...）。
 // 只有**非 legacy**（0.2.0 形态）的宿主才走设置文件那条路，所以要单独 mount 一个假 ctx。
 {
-  check('legacy 宿主上也挂了设置路由（可选注入不炸）', capturedRoutes.some((r) => r.path === '/api/qq-bridge/settings'))
+  check(
+    'legacy（0.1.5）宿主上**不**挂设置路由 —— 老模型读 settings 命名空间，挂了也是改了不生效的死接口',
+    !capturedRoutes.some((r) => r.path === '/api/qq-bridge/settings'),
+  )
 
   const apiRoutes = []
   const apiCtx = {

@@ -1500,8 +1500,10 @@ export function apply(ctx, config) {
 
   // 0.2.0：宿主设置桥写不了 → 自己挂一条**只服务本机**的设置接口（范本：皮肤中心的 /api/skin-center/...）。
   // 可选注入：没有 webServer 服务的部署照常工作（只是卡片仍拿不到可写域）。
-  // （`ctx.inject` 是 Cordis 核心 API，真实宿主一定有；容错只是为了让不带它的极简测试桩也能跑。）
-  if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (scoped) => {
+  // ⚠️ **只在非老模型（0.2.0 那类）宿主上挂**：老模型（0.1.5）读的是 settings 命名空间、不读这个文件，
+  // 挂上去只会是个"改了不生效"的死接口。（`ctx.inject` 是 Cordis 核心 API，真实宿主一定有，
+  // 容错只是为了让不带它的极简测试桩也能跑。）
+  if (!legacySettings && typeof ctx.inject === 'function') ctx.inject(['webServer'], (scoped) => {
     const server = scoped?.webServer
     if (!server || typeof server.register !== 'function') return
     try {
