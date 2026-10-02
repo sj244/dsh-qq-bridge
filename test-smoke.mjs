@@ -82,6 +82,10 @@ function check(label, cond, extra = '') {
 }
 
 apply(ctx, config)
+// legacy（0.1.5 形态）宿主上**不该**挂设置接口：老模型读 settings 命名空间、不读设置文件，
+// 挂上去只会是"改了不生效"的死接口。⚠️ 这条必须在**其它假 ctx 跑 apply 之前**断言 ——
+// 后面那些 `{...ctx}` 会继承主 ctx 的 webServer，往同一个数组里塞路由（第一版就被污染了）。
+check('legacy 宿主上不挂设置路由', !capturedRoutes.some((r) => r.path === '/api/qq-bridge/settings'))
 console.log('registered tools:', registered.map((t) => t.name).join(', '))
 check('apply 未抛错且注册了 6 个工具', registered.length === 6)
 
@@ -983,11 +987,6 @@ if (sim) {
 // （范本：@linxin666/dsh-client-ui-skin-center 的 /api/skin-center/...）。
 // 只有**非 legacy**（0.2.0 形态）的宿主才走设置文件那条路，所以要单独 mount 一个假 ctx。
 {
-  check(
-    'legacy（0.1.5）宿主上**不**挂设置路由 —— 老模型读 settings 命名空间，挂了也是改了不生效的死接口',
-    !capturedRoutes.some((r) => r.path === '/api/qq-bridge/settings'),
-  )
-
   const apiRoutes = []
   const apiCtx = {
     ...ctx,
