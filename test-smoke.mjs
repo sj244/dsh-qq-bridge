@@ -500,6 +500,7 @@ if (sim) {
   check('用法说明：截断阈值跟着 replyMaxChars 走', p.includes('1200 字'), p.slice(0, 80))
   check('用法说明：明确「回群只用标记块，别拿 send 工具当回复通道」', p.includes('qq_bridge_send') && p.includes('别拿它当回复通道'))
   check('用法说明：说明被戳会显示成「[戳一戳]（戳的是我）」', p.includes('[戳一戳]') && p.includes('戳的是我'))
+  check('用法说明：发了表情包不要解释（人自己看得懂）', p.includes('不要解释') && p.includes('表情包'))
   // 表情包是产品玩法：提示词必须教模型怎么用（否则工具存在但永远没人调）
   check(
     '用法说明：图片占位符带短哈希（模型能指着一张具体的图）',
