@@ -64,7 +64,7 @@
 | `test-stickers.mjs` | 8.5 KB | **表情包测试**：登记表哈希 / 读写 / 查找 / 原子写 / 复制图片本体（见 §13.9） |
 | `screenshots.json` | 0.0 KB | 市场详情页截图声明（指向 `assets\market-cover.jpg`，见 §16） |
 | `assets\` | 197.1 KB | 仓库内静态资源：市场封面 `market-cover.jpg`（见 §16） |
-| `docs\` | 16.7 KB | 仓库内文档：市场条目 yml、DSH 0.2.0 迁移说明、v0.1.2 与 v0.1.3 发行说明 |
+| `docs\` | 16.5 KB | 仓库内文档：市场条目 yml、DSH 0.2.0 迁移说明、v0.1.2 与 v0.1.3 发行说明 |
 | `LICENSE` | 1.0 KB | MIT，Copyright (c) 2026 sj244 |
 | `node_modules\@deepseek-ai` | junction | 本地安装时让 `import '@deepseek-ai/...'` 能解析（见 §7 坑 1）；**已 gitignore** |
 | `HANDOVER.local.md` | — | **未脱敏**的原始交接文档（含真实会话 id / 本机路径 / 群号），**只在本机，已 gitignore** |
