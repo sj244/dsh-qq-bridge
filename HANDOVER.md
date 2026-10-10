@@ -440,6 +440,9 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 - [ ] 确认当前目标会话 id，并更新 `cordis.patch.yml` / settings
 - [ ] 白名单默认为空，正式使用前必须填入真实 QQ openid
 - [ ] 确定 NapCat 的 WS 地址与 token（并决定 7998 端口冲突怎么处理）
+- [ ] 设置卡片的「目标会话」下拉剔除**子代理会话**（`SessionSummary.origin === 'subagent'`），
+      或用展开项折叠，别一次铺开一长串；剔除后要给当前选中项兜底
+      （见 `client/client.js` 的 `sessionOptions()` TODO）
 - [x] 实现 M2：入站 → `handleInbound()`；出站 `sendToQQ()` → `send_private_msg`/`send_group_msg`
 - [x] 实现 M3：设置界面（或验证通用设置表单已够用）
 - [ ] 重装插件 → 重启 `dsh web` → 用 §8 第 5 步验证

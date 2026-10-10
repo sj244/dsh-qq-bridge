@@ -184,6 +184,13 @@ window.__ModuleLoader__.load({
      * **归档的会话不列出来**（用户报的 bug：下拉里混进了一堆早就归档的会话）——
      * 归档集在 workspace 域：`ctx.workspaces.list.getSnapshot().archivedSessionIds`。
      *
+     * ⚠️ **TODO（下次修）：子代理会话也会被列进来。**
+     * `SessionSummary` 上有 `origin?: 'subagent'` 与 `parentId?: SessionId`
+     * （见 `@deepseek-ai/dsh-api-session-controller` 的 `SessionSummary`），据此可以剔除。
+     * 剔除之后同样要给**当前选中项**兜底，规则与下面的归档处理一致 ——
+     * 否则子代理会话是当前目标时，一保存就把目标会话清空。
+     * 退化做法也可接受：把它们折叠进一个“显示子代理会话”的展开项，别一次铺开一长串。
+     *
      * 两个兜底项都是必要的：
      * - 配置里那个 id 可能**不在**列表里（别的工作区、宿主还没加载完）；
      * - 也可能**正好是归档的**（用户刚把它归档了）。
