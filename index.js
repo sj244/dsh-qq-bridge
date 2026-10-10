@@ -2066,9 +2066,11 @@ export function apply(ctx, config) {
   /**
    * 记一条“出站被拒”的丢弃台账（内存 + 落盘，环形上限 `MAX_DROPPED`）。
    *
-   * 为什么要有它：`qq_bridge_send` 工具把 `reason` 直接回给模型，标记块那条路没有回执 ——
-   * 两条路行为不一致，标记块模式下模型以为已经回复了。丢弃台账是标记块那条路的独立记录。
-   * 字段：`at` / `via`（marker ｜ always）/ `reason` / `limit` / `length` / 目的地 / `sessionId`。
+   * 为什么要有一条独立台账：被拒的出站**不进 `outbox`** —— 那份台账的语义是“真的发到 QQ 了”，
+   * 把被拒的写进去就是假账。但被拒这件事本身要能事后查到，所以单独记一份。
+   * 两条出站路径都记这里：标记块（`marker` / `always`）与 `qq_bridge_send` 工具（`tool`）。
+   * 工具路径只是多给模型一份回执，台账口径与标记块一致。
+   * 字段：`at` / `via`（marker ｜ always ｜ tool）/ `reason` / `limit` / `length` / 目的地 / `sessionId`。
    *
    * 只记 `dropped: true` 的结果；成功出站一律进 outbox。
    */
@@ -2321,7 +2323,7 @@ export function apply(ctx, config) {
           : undefined
       try {
         const result = await sendToQQ(args.text, dest)
-        // 只记真的发出去的：被拒绝的不落台账。
+        // 只记真的发出去的：被拒绝的不落 outbox。
         if (result?.sent > 0) {
           recordOutbox({
             sessionId: 'tool:qq_bridge_send',
@@ -2330,6 +2332,17 @@ export function apply(ctx, config) {
             nonQQTurn: !currentTurnFromQQ,
             to: result?.destination ?? dest ?? state.lastDestination,
             text: args.text,
+          })
+        } else if (result?.dropped) {
+          // 被拒的同样进丢弃台账：排查“机器人到底试过没有”时不该按出站路径分家。
+          // 工具路径不需要回注会话 —— 原因已经随工具结果回给模型了。
+          recordDropped({
+            via: 'tool',
+            reason: result.reason,
+            limit: result.limit ?? null,
+            length: result.length ?? null,
+            destination: dest ?? state.lastDestination,
+            sessionId: 'tool:qq_bridge_send',
           })
         }
         return JSON.stringify(result, null, 2)

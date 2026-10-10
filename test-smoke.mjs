@@ -2149,6 +2149,13 @@ function sawSentText(s) {
     check('超长出站不调用 transport（一条都不发）', after === before, `出站动作数 ${before} → ${after}`)
     // 台账只记真的发出去的：被拒绝的不落 outbox，否则事后对不上账。
     check('超长被拒不落 outbox（台账不记假账）', !(await sawOutbox('xxxx')), JSON.stringify(await status2.execute({})))
+    // 被拒的要进丢弃台账，且工具路径与标记块路径口径一致（都记 via）。
+    const toolDrop = JSON.parse(await status2.execute({})).recentDropped.slice(-1)[0]
+    check(
+      '超长被拒进 recentDropped（via=tool）',
+      toolDrop?.via === 'tool' && toolDrop?.reason === 'too-long' && toolDrop?.length === longText.length,
+      JSON.stringify(toolDrop),
+    )
 
     // ② 标记块通道：拒绝结果要进日志（能看出是超长被拒）。
     const warned = warnings.length
