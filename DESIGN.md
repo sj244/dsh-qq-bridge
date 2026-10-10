@@ -26,11 +26,11 @@
 - **昵称匹配**：归一化后子串匹配（小写、去空格与常见标点），另支持 QQ @机器人
   （array 形态看 `{type:'at'}` 段，string 形态看 `[CQ:at,qq=…]` CQ 码）。
 - **只记录**：消息只进 `state.buffer`（上限 200 条），**期间零模型调用**。
-  在下一次真正唤醒时，把最近 `recentChatLimit`（默认 20）条拼成
+  在下一次真正唤醒时，把最近 `recentChatLimit`（默认 8）条拼成
   `[QQ 未唤醒期间聊天记录 · 最近 N 条] … [记录结束]` 作为前缀附在那条唤醒消息上，然后清空缓冲。
   → 既不丢上下文，也**不会**给每条闲聊都写一次会话日志（省 token + 不污染上下文）。
   > ⚠️ 早期草案这里写的是 `agent.inject()`（每条都进模型上下文，但**也每条都写会话日志**）；
-  > 实现改成了「缓冲 + 摘要前缀」，长聊时不会膨胀。**以代码为准。**
+  > 实现改成了“缓冲 + 摘要前缀”，长聊时不会膨胀。**以代码为准。**
 - **唤醒（followup）**：`agent.followup(msg)` —— 排队一轮普通对话（agent 忙时自动排队，不并发重叠）。
   调用时包一层 `ctx.agents.withInitiator(agent, …)`：OneBot 的 WS 回调本身**没有发起者**，
   而某些插件会调 `agents.requireInitiator()` 并在无发起者时抛错。
@@ -74,7 +74,7 @@ ensureTargetAgent():
 | `whitelist` | string[] | `[]` | 私聊 openid 白名单（空=全拒，fail-closed） |
 | `groupWhitelist` | string[] | `[]` | 群 openid 白名单 |
 | `attachRecentChat` / `recentChatLimit` | boolean / number | `true` / `8` | 未唤醒聊天是否作为摘要附给下次唤醒、条数 |
-| `replyMaxChars` | number | `1500` | 出站分段上限（下限 100） |
+| `replyMaxChars` | number | `1500` | 出站字数上限（下限 100）；**超过就不发送** |
 | `replyMode` | string | `'marker'` | 出站闸门：只发 `[QQ]…[/QQ]` 块内的内容；`'always'` = 整轮都发 |
 | `onebotUrl` | string | `''` | NapCat 正向 WS 地址；**空 = 不启用传输** |
 | `accessTokenEnv` | string（`role('credential-ref')`） | `''` | access_token 的凭据引用名，**不放明文** |
@@ -87,18 +87,18 @@ Config（`cordis.patch.yml`）另有：`agentPreset`、`statePath`、`debugTools
 
 ## 6. 设置界面（client 半）
 
-一页 `settings.section`「QQ 桥接」：
+一页 `settings.section`“QQ 桥接”：
 - **昵称**：标签式增删（chips）
 - **白名单**：私聊/群两组列表增删（可一键填入当前会话/最近发送者 openid）
-- **唤醒概率**：0–100% 滑块（默认 5%），旁边显示"约每 N 条醒一次"
-- **目标会话**：从会话列表选一个（显示工作区与标题），并展示"已加载/需 resume"
+- **唤醒概率**：0–100% 滑块（默认 5%），旁边显示“约每 N 条醒一次”
+- **目标会话**：从会话列表选一个（显示工作区与标题），并展示“已加载/需 resume”
 - **连接状态**：QQ 网关在线/断线、最近 20 条唤醒日志（醒 / 只记录 / 丢弃原因）
 
 ## 7. QQ 接入方式：**B —— OneBot（NapCat，个人 QQ 号）· M2 已实现**
 
 - ✅ **采用 B. OneBot 协议**（NapCat / go-cqhttp 等）：**可用个人 QQ 号**，私聊/群都能收。
 - ~~A. QQ 官方机器人（q.qq.com）~~：**已否决**（只能用官方 Bot 身份，不能当个人号）。
-- **实现形态**：插件是 **WS 客户端**，主动连 NapCat 的「正向 WebSocket」。
+- **实现形态**：插件是 **WS 客户端**，主动连 NapCat 的“正向 WebSocket”。
   - 用 Node 内置全局 `WebSocket`（Node ≥ 22），**不依赖 `ws`**——插件目录只挂了
     `@deepseek-ai` 一个 junction，`ws` 从该目录解析不到（`ERR_MODULE_NOT_FOUND`）。
   - 内置 WebSocket 是 WHATWG 接口、**不支持自定义请求头**，所以 `access_token` 走
@@ -107,12 +107,13 @@ Config（`cordis.patch.yml`）另有：`agentPreset`、`statePath`、`debugTools
   - 防回环：忽略 `post_type:'message_sent'` 与 `user_id === self_id`。
   - 入站映射**同时兼容** `message` 为 **array** 与 **string** 两种形态
     （array 看 `{type:'at'}` 段判 @；string 则解析 `[CQ:at,qq=…]`）。
-- 现场线索（需现场核实）：NapCat 端口 **7998** 可能被旧 MaiBot 占用；群号 **<GROUP_ID>**；
+- 现场线索（已在真机核实，见 `HANDOVER.md` §12）：正向 WebSocket 端口 **3001**、WebUI 端口 **6099**；
   消息格式为 **`array`**（非 `string`）；**`reportSelfMessage: false` 保持 false**（防回复死循环）。
-- 出站：`send_private_msg` / `send_group_msg`，按 `replyMaxChars` 分段，
+- 现场线索（未再核实）：NapCat 端口 **7998** 是否被旧 MaiBot 占用；群号 **<GROUP_ID>**。
+- 出站：`send_private_msg` / `send_group_msg`，按 `replyMaxChars` 判定，超长一条都不发，
   目的地 = **最后一次入站消息的来源**（持久化在 `state.lastDestination`）。
 
-### 7.1 NapCat 自助托管（M5，"一键包"体验但不真打包）
+### 7.1 NapCat 自助托管（M5，“一键包”体验但不真打包）
 
 思路：**不把 NapCat 打进仓库**，而是在需要时由插件从官方 Releases 现取并托管。
 
@@ -125,7 +126,7 @@ qq_bridge_napcat
   stop       → 结束该进程
 ```
 
-- **安全模型**：所有动作都由**显式工具调用**触发；插件加载时绝不下崽、绝不执行任何东西。
+- **安全模型**：所有动作都由**显式工具调用**触发；插件加载时不下载、不执行任何内容。
 - **下载实现**：优先 `ctx.subprocess` + 系统自带 `curl.exe`（能带 `-x` 代理；本机直连 GitHub 不通），
   无 subprocess 时退回内置 `fetch`。
 - **校验**：按 GitHub Release 的 `asset.digest` 做 sha256，不符即删文件报错。
@@ -144,10 +145,8 @@ qq_bridge_napcat
   `followup` + 唤醒策略引擎 + 出站采集 + 调试工具；曾在运行中的 host 内验证三条策略分支。
 - **M2** ✅ **已完成，并已在真实 NapCat + 真实 QQ 上端到端跑通**（收/发/三种策略分支全部实测）。
   传输层 `onebot.js`；离线测试 `test-onebot.mjs`；真机实录见 `HANDOVER.md` §12。
-- **M6（新增）** ✅ 出站闸门 `replyMode`（只发 `[QQ]…[/QQ]`）、上下文上限、
-  非文本消息段占位符 —— 都是真机联调暴露出来才补的。见 `HANDOVER.md` §12.4–12.6。
 - **M3** ✅ **已完成并真机验证（读 / 写 / 生效全通）**：设置界面 —— `设置 → 插件 → 插件配置`
-  里的「QQ 桥接」卡片。
+  里的“QQ 桥接”卡片。
   关键发现：那一页**按 settings 命名空间派发卡片**，只有宿主半 = 交集为空 = 界面上什么都不出现，
   所以补了浏览器半 `client/client.js`（手写 `__ModuleLoader__` bundle，不依赖构建步骤）
   与 `package.json` 的 `dsh.client`。详见 `HANDOVER.md` §15。
@@ -157,8 +156,15 @@ qq_bridge_napcat
   写 OneBot 配置 / 启停，见 §7.1。
   ✅ 真实数据验证过：下载 OneKey 包，sha256 与 Release digest 一致，纯 Node 解包出全部 9 个文件。
   ⚠️ **未在真实 NapCat 上跑通全流程**（安装器与 QQ 登录是交互式的，需要人在场）。
-- **M6/M7** ✅ **已完成**：真机联调补齐（出站标记闸门、上下文上限、图片缓存+多模态描述、会话跟随、
-  用法注入系统提示），以及安全边界（分节提示词契约 + **明确不做审批桥接**）。
+- **M6** ✅ **已完成**：真机联调补齐 —— 出站标记闸门（`replyMode`，只发 `[QQ]…[/QQ]`）、上下文上限、
+  非文本消息段占位符、图片缓存 + 多模态描述、会话跟随、用法注入系统提示。
+  见 `HANDOVER.md` §12.4–12.6 与 §13。
+- **M7** ✅ **已完成**：安全边界 —— 用法说明重写为分节契约（含**无人值守不碰特权操作**）；
+  **明确不做审批桥接**。见 §9 与 `HANDOVER.md` §14。
+- **M8** ✅ **已完成**：分得清“在 QQ 还是 DSH 里” —— 出站闸门按来源生效、出站方式做成开关
+  （`replyMode` 含 `'tool'`）、改模式立刻重挂提示词。见 `HANDOVER.md` §17、§17.5。
+- **M9** 🚧 **进行中**：戳一戳 —— 入站已通（戳我必唤醒），出站受 NapCat PacketBackend 限制。
+  见 `HANDOVER.md` §13.2b。
 
 ## 9. 安全与注意
 
