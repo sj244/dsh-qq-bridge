@@ -1820,6 +1820,228 @@ function sawSentText(s) {
   rmSync(dir, { recursive: true, force: true })
 }
 
+// ★ 视觉模型解析结果按**设置签名**缓存（用户报的“卡片里填了 visionModel 不生效”）：
+//   1. 解析结果与 `visionModel` 的值绑定，值一改就重新解析；
+//   2. 解析失败的 `null` 也带签名，不会被永久记住；
+//   3. 值没变就命中缓存，**不再枚举**模型列表（`listModels` 的调用次数就是观测点）。
+//   独立 ctx + 独立 statePath：与前面的用例完全隔离，也不碰共享的 `resolvedSettings` / `config`。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-vision-'))
+  const statePathV = join(dir, 'state.json')
+  // 一张**没有登记**过的图：describeImage 会真的走到多模态模型那条路。
+  const pngV = Buffer.from('89504e470d0a1a0a0000000d4948445200000002000000020806000000', 'hex')
+  const hashV = hashOfBuffer(pngV)
+  const imagePathV = join(dir, `image-${hashV}.png`)
+  writeFileSync(imagePathV, pngV)
+  writeFileSync(
+    statePathV,
+    `${JSON.stringify({
+      buffer: [{
+        at: 1,
+        userId: 'test-user',
+        nickname: '群友',
+        groupName: null,
+        text: '看这个 [图片]',
+        images: [{ path: imagePathV, mediaType: 'image/png', bytes: pngV.length, hash: hashV }],
+      }],
+    })}\n`,
+    'utf8',
+  )
+
+  const routesV = []
+  const toolsV = []
+  const handlersV = {}
+  // 观测点：模型列表被枚举几次、多模态调用收到哪个 provider/model。
+  let listModelsCalls = 0
+  let modelsV = []
+  const streamedV = []
+  const llmV = {
+    listProviders: () => [{ id: 'prov-a' }],
+    listModels: async () => {
+      listModelsCalls += 1
+      return modelsV
+    },
+    stream: async function* (opts) {
+      streamedV.push(`${opts.provider}/${opts.model}`)
+      yield { type: 'text-delta', text: '图里写着“测试”' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  let injectedV = null
+  const agentV = {
+    id: 'session-vision',
+    ctx: { get: () => undefined, effect: () => () => {} },
+    status: 'idle',
+    session: { id: 'session-vision' },
+    followup: (m) => { injectedV = m },
+  }
+  const ctxV = {
+    logger: { info() {}, warn: (m) => warnings.push(String(m)) },
+    settings: { describe: () => [], update: async () => {}, configure: () => () => {} },
+    agents: {
+      get: (id) => (id === agentV.id ? agentV : undefined),
+      roots: () => [],
+      resume: async () => { throw new Error('vision: no agent factory') },
+    },
+    tools: { register: (def) => toolsV.push(def) },
+    on: (name, fn) => { handlersV[name] = fn; return () => {} },
+    effect: () => {},
+    get: (name) => {
+      if (name === 'llm') return llmV
+      if (name === 'attachments') {
+        return { imageLimits: { maxImagesPerMessage: 4 }, saveImage: async ({ mediaType }) => ({ id: 'vision-att', mediaType }) }
+      }
+      return undefined
+    },
+    webServer: { register: (route) => { routesV.push(route); return () => {} } },
+  }
+  ctxV.inject = (_deps, cb) => cb(ctxV)
+  // 起始设置：显式写死 `provider/model` —— 这条路径解析时**不枚举**模型列表。
+  writeFileSync(
+    join(dir, 'qq-bridge-settings.json'),
+    `${JSON.stringify({ version: 1, values: { visionModel: 'prov-a/explicit-a' } })}\n`,
+    'utf8',
+  )
+  apply(ctxV, {
+    targetSessionId: 'session-vision',
+    statePath: statePathV,
+    debugTools: true,
+    onebotUrl: '',
+    wakeProbability: 0,
+    nicknames: ['244'],
+    whitelist: ['test-user'],
+    groupWhitelist: [],
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+
+  const statusV = toolsV.find((t) => t.name === 'qq_bridge_status')
+  const simV = toolsV.find((t) => t.name === 'qq_bridge_simulate')
+  const routeV = routesV.find((r) => r.path === '/api/qq-bridge/settings')
+  check('视觉模型：独立 ctx 挂上了状态工具与设置路由', !!statusV && !!simV && !!routeV)
+
+  // 用设置接口改值 —— 与真机上卡片的路径一致（写文件后调 applySettingChanges）。
+  const setV = async (set) => {
+    const out = { status: 0, body: '' }
+    await routeV.handler(
+      {
+        method: 'POST',
+        url: '/api/qq-bridge/settings',
+        socket: { remoteAddress: '127.0.0.1' },
+        async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ set })) },
+      },
+      { writeHead: (s) => { out.status = s }, end: (b) => { out.body = String(b ?? '') } },
+    )
+    return out
+  }
+  const resolvedV = async () => JSON.parse(await statusV.execute({})).visionModel
+
+  try {
+    // ① 显式设置：直接命中，一次都不枚举；第二次仍然命中缓存。
+    const first = await resolvedV()
+    check(
+      '视觉模型：显式 provider/model 直接命中（不枚举模型列表）',
+      first?.provider === 'prov-a' && first?.model === 'explicit-a' && listModelsCalls === 0,
+      JSON.stringify({ first, listModelsCalls }),
+    )
+    const second = await resolvedV()
+    check(
+      '视觉模型：设置没变 → 命中缓存，不再枚举',
+      second?.model === 'explicit-a' && listModelsCalls === 0,
+      JSON.stringify({ second, listModelsCalls }),
+    )
+
+    // ② 换成一个**不带 `/`** 的值：解析走自动查找这条路（只有这条路会枚举模型列表）。
+    //    此刻模型列表为空。
+    modelsV = []
+    const set1 = await setV({ visionModel: 'no-slash-a' })
+    check('视觉模型：设置接口写入成功（换值）', set1.status === 200, `${set1.status} ${set1.body.slice(0, 80)}`)
+    const failed = await resolvedV()
+    check(
+      '视觉模型：解析失败 → 返回原来的“没找到”结果，且只枚举 1 次',
+      failed === '(没找到支持图片输入的模型)' && listModelsCalls === 1,
+      JSON.stringify({ failed, listModelsCalls }),
+    )
+    const failedAgain = await resolvedV()
+    check(
+      '视觉模型：失败的 null 也进缓存（连调 2 次仍只枚举 1 次）',
+      failedAgain === '(没找到支持图片输入的模型)' && listModelsCalls === 1,
+      JSON.stringify({ failedAgain, listModelsCalls }),
+    )
+
+    // ③ 值变了（仍然走自动查找）：必须重新枚举，并拿到新模型。
+    modelsV = [{ id: 'smoke-vision-b', provider: 'prov-b', inputModalities: ['image'] }]
+    await setV({ visionModel: 'no-slash-b' })
+    const refreshed = await resolvedV()
+    check(
+      '视觉模型：改设置后重新枚举（listModels +1）并拿到新模型',
+      refreshed?.provider === 'prov-b' && refreshed?.model === 'smoke-vision-b' && listModelsCalls === 2,
+      JSON.stringify({ refreshed, listModelsCalls }),
+    )
+    const refreshedAgain = await resolvedV()
+    check(
+      '视觉模型：新结果同样进缓存（不再枚举）',
+      refreshedAgain?.model === 'smoke-vision-b' && listModelsCalls === 2,
+      JSON.stringify({ refreshedAgain, listModelsCalls }),
+    )
+
+    // ④ 只改**别的**设置项：视觉模型的缓存必须留着，不能白枚举一次。
+    await setV({ nicknames: ['244'] })
+    const untouched = await resolvedV()
+    check(
+      '视觉模型：只改别的设置项时不动视觉缓存',
+      untouched?.model === 'smoke-vision-b' && listModelsCalls === 2,
+      JSON.stringify({ untouched, listModelsCalls }),
+    )
+
+    // ⑤ 真的走一遍描述路径：缓存命中 → 用的是刚解析出来的新模型。
+    const wokeV = JSON.parse(await simV.execute({ text: '244 看这个图', userId: 'test-user', nickname: '群友' }))
+    check('视觉模型：独立 ctx 的唤醒走通', wokeV?.decision?.delivered === true, JSON.stringify(wokeV?.decision ?? wokeV))
+    check(
+      '视觉模型：描述路径用的是新模型（多模态调用的 provider/model 可观测）',
+      streamedV[streamedV.length - 1] === 'prov-b/smoke-vision-b',
+      JSON.stringify(streamedV),
+    )
+    const textV = String(injectedV?.content?.[0]?.text ?? '')
+    check(
+      '视觉模型：新模型写出的描述进了注入正文',
+      textV.includes(`[图片#${hashV.slice(0, 6)}]：图里写着“测试”`),
+      textV.slice(-90).replace(/\n/g, ' '),
+    )
+
+    // ⑥ 换成显式值：立刻生效，仍然不枚举。
+    await setV({ visionModel: 'prov-c/explicit-c' })
+    const explicitAgain = await resolvedV()
+    check(
+      '视觉模型：改成显式值时立刻生效（仍然不枚举）',
+      explicitAgain?.provider === 'prov-c' && explicitAgain?.model === 'explicit-c' && listModelsCalls === 2,
+      JSON.stringify({ explicitAgain, listModelsCalls }),
+    )
+
+    // ⑦ 解析失败的结果不留到下一次设置变更。
+    //   之后补上视觉模型时，改任何设置都会重试一次，不必专门去动 visionModel 的值。
+    await setV({ visionModel: 'no-slash-d' })
+    modelsV = []
+    const beforeFail = listModelsCalls
+    const failD = await resolvedV()
+    check(
+      '视觉模型：解析失败仍然返回“没找到”',
+      failD === '(没找到支持图片输入的模型)' && listModelsCalls === beforeFail + 1,
+      JSON.stringify({ failD, listModelsCalls }),
+    )
+    // 模型此时已可用，但设置值没变 —— 单靠签名不会失效。
+    modelsV = [{ id: 'smoke-vision-e', provider: 'prov-e', inputModalities: ['image'] }]
+    await setV({ nicknames: ['244'] })
+    const retried = await resolvedV()
+    check(
+      '视觉模型：失败结果不留 → 改别的设置项也会重试并拿到补上的模型',
+      retried?.provider === 'prov-e' && retried?.model === 'smoke-vision-e' && listModelsCalls === beforeFail + 2,
+      JSON.stringify({ retried, listModelsCalls }),
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 // 用例用过的临时图片：留着只会在 %TEMP% 里积垃圾
 rmSync(cachedImagePath, { force: true })
 

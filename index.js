@@ -911,22 +911,38 @@ export function apply(ctx, config) {
   /** 单张图的描述最多试几次（1 次 + 2 次重试）—— 多模态调用有几率偶发失败。 */
   const VISION_ATTEMPTS = 3
 
-  let visionModelCache
+  /**
+   * 视觉模型解析结果的缓存。
+   * 签名取与解析结果相关的设置值（当前只有 `visionModel`）；签名不同就重新解析。
+   * 解析失败时缓存的 `model` 是 `null`，这条缓存同样带签名 —— 设置一改自然失效。
+   */
+  let visionModelCache = { signature: null, model: null }
+
+  /** 与视觉模型解析结果相关的设置值拼成的签名。 */
+  function visionModelSignature(s = readSettings()) {
+    return `visionModel=${s.visionModel}`
+  }
+
   /**
    * 找一个**支持图片输入**的模型（`inputModalities` 含 `'image'`）。
-   * 设置里显式给了 `visionModel`（`provider/model`）就优先用它。结果缓存在内存。
+   * 设置里显式给了 `visionModel`（`provider/model`）就优先用它。
+   * 结果按签名缓存在内存：设置没变就不重复枚举模型列表。
    */
   async function findVisionModel() {
-    if (visionModelCache !== undefined) return visionModelCache
-    visionModelCache = null
+    const signature = visionModelSignature()
+    if (visionModelCache.signature === signature) return visionModelCache.model
+    // 先写入带签名的 null：解析失败时这就是本次结果，并发调用也不会重复枚举。
+    visionModelCache = { signature, model: null }
+
     const llm = ctx.get('llm')
     if (!llm) return null
 
     const explicit = readSettings().visionModel
     if (explicit && explicit.includes('/')) {
       const idx = explicit.indexOf('/')
-      visionModelCache = { provider: explicit.slice(0, idx), model: explicit.slice(idx + 1) }
-      return visionModelCache
+      const resolved = { provider: explicit.slice(0, idx), model: explicit.slice(idx + 1) }
+      visionModelCache.model = resolved
+      return resolved
     }
 
     try {
@@ -942,9 +958,10 @@ export function apply(ctx, config) {
         // 名字带 vision 的通常是专门的视觉模型，比"顺带支持图片"的主力模型更稳。
         const hit = models.find((m) => isVision(m) && /vision/i.test(String(m.id))) ?? models.find(isVision)
         if (hit) {
-          visionModelCache = { provider: hit.provider ?? p.id, model: hit.id }
-          logger.info(`视觉模型：${visionModelCache.provider}/${visionModelCache.model}`)
-          return visionModelCache
+          const resolved = { provider: hit.provider ?? p.id, model: hit.id }
+          visionModelCache.model = resolved
+          logger.info(`视觉模型：${resolved.provider}/${resolved.model}`)
+          return resolved
         }
       }
       logger.warn('没找到支持图片输入的模型；图片只能以占位符呈现')
@@ -1284,8 +1301,9 @@ export function apply(ctx, config) {
       return failWake(error)
     }
     logger.info(`已投递 QQ 消息（${wantSteer ? 'steer 插话' : 'followup 排队'}${running ? '，目标正忙' : ''}）`)
-    // 只移除**确实进了这次摘要**的那些条目（按对象身份），
-    // 期间新到的消息要留在缓冲里等下一次唤醒。
+    // 按快照过滤：快照里的条目**全部**移除（按对象身份比较）。
+    // 摘要有条数与字数上限，没进这一次摘要的旧条目也一起删掉，不会留到下一次唤醒。
+    // 快照之后才到的消息不在快照里，留在缓冲里等下一次唤醒。
     state.buffer = state.buffer.filter((m) => !bufferSnapshot.includes(m))
     saveState()
     logger.info(`woke target session (${d.reason})`)
@@ -1544,6 +1562,12 @@ export function apply(ctx, config) {
   /** 设置变了之后的副作用：用法说明重挂 + 传输重连。老模型的 settings 事件与本机接口共用。 */
   function applySettingChanges() {
     const s = readSettings()
+
+    // 视觉模型的解析结果按设置签名缓存：`visionModel` 变了才丢缓存。
+    // 解析失败（`model` 为 `null`）不留到下一次设置变更 —— 之后补上视觉模型时，
+    // 改任何设置都会重试一次，不必专门去动 `visionModel` 的值。
+    // 成功的解析照旧按签名缓存，设置没变就不重复枚举模型列表。
+    if (visionModelCache.model === null) visionModelCache = { signature: null, model: null }
 
     // 出站方式是**开关**，而系统提示词正文是**挂载那一刻的快照** —— 改了它必须重挂，
     // 否则模型会照着一个在本部署里根本不生效的做法回话（用户追问「系统提示词更新了吗」时发现的）。
