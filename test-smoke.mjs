@@ -136,6 +136,10 @@ function check(label, cond, extra = '') {
 }
 
 apply(ctx, config)
+// ⚠️ 后面若干 `{...ctx}` 派生的 ctx 会重新 `apply`，并且**共用同一个 `on`** ——
+// 那会覆盖 `handlers['session/event']`。需要主 ctx 时序（主 ctx 的 state 与传输）的用例
+// 必须用这里保存的引用，否则喂进去的事件跑在别的 ctx 上（那些 ctx 的 state 是空的）。
+const mainSessionHandler = handlers['session/event']
 // legacy（0.1.5 形态）宿主上**不该**挂设置接口：老模型读 settings 命名空间、不读设置文件，
 // 挂上去只会是"改了不生效"的死接口。⚠️ 这条必须在**其它假 ctx 跑 apply 之前**断言 ——
 // 后面那些 `{...ctx}` 会继承主 ctx 的 webServer，往同一个数组里塞路由（第一版就被污染了）。
@@ -2039,6 +2043,216 @@ function sawSentText(s) {
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ★ 摘要的省略条数必须是**真实丢失量**，并且大于 99 条时只写“大量消息”。
+//   窗口外（比 recentChatLimit 更早）的条目同样随快照一起删掉，必须计入省略数；
+//   字数预算装不下的窗口内条目同样计入。
+//   独立 ctx + 独立 statePath：与前面的用例完全隔离，也不碰共享的 `resolvedSettings` / `config`。
+{
+  const dirA = mkdtempSync(join(tmpdir(), 'qq-bridge-digest-'))
+  const statePathA = join(dirA, 'state.json')
+  writeFileSync(statePathA, `${JSON.stringify({ buffer: [] })}\n`, 'utf8')
+
+  const toolsA = []
+  let injectedA = ''
+  const agentA = {
+    id: 'session-digest',
+    ctx: { get: () => undefined, effect: () => () => {} },
+    status: 'idle',
+    session: { id: 'session-digest' },
+    followup: (m) => { injectedA = String(m?.content?.[0]?.text ?? '') },
+  }
+  const ctxA = {
+    logger: { info() {}, warn: (m) => warnings.push(String(m)) },
+    settings: { describe: () => [], update: async () => {}, configure: () => () => {} },
+    agents: {
+      get: (id) => (id === agentA.id ? agentA : undefined),
+      roots: () => [],
+      resume: async () => { throw new Error('digest: no agent factory') },
+    },
+    tools: { register: (def) => toolsA.push(def) },
+    on: () => () => {},
+    effect: () => {},
+    get: () => undefined,
+    webServer: { register: () => () => {} },
+  }
+  ctxA.inject = (_deps, cb) => cb(ctxA)
+  // `recentChatLimit` 与 `attachRecentChat` 走 `config`：readSettings() 每次都回落到它，
+  // 所以 `attachRecentChat` 可以在用例中途改（不必重挂插件）。
+  const configA = {
+    targetSessionId: 'session-digest',
+    statePath: statePathA,
+    debugTools: true,
+    onebotUrl: '',
+    wakeProbability: 0,
+    nicknames: ['244'],
+    whitelist: ['test-user'],
+    groupWhitelist: [],
+    recentChatLimit: 8,
+    napcatInstallDir: join(dirA, 'no-napcat'),
+  }
+  apply(ctxA, configA)
+  const simA = toolsA.find((t) => t.name === 'qq_bridge_simulate')
+
+  // 只记录：wakeProbability=0，正文里也没有昵称 → record（进缓冲）。
+  const recordA = async () => { await simA.execute({ text: 'aaaa', userId: 'test-user', nickname: '甲' }) }
+  // 唤醒：正文命中昵称“244” → 必唤醒，与概率无关。
+  const wakeA = async () => {
+    injectedA = ''
+    await simA.execute({ text: '244', userId: 'test-user', nickname: '甲' })
+    return injectedA.split('\n')[0]
+  }
+
+  try {
+    // ① 缓冲为空 → 摘要为空（行为不变）。
+    const head0 = await wakeA()
+    check('摘要：缓冲为空时不拼摘要', !injectedA.includes('[QQ 未唤醒期间聊天记录'), head0)
+
+    // ② 缓冲 20 条 + recentChatLimit 8 + 字数预算充足 → 窗口外的 12 条也计入省略数。
+    for (let i = 0; i < 20; i++) await recordA()
+    const head1 = await wakeA()
+    check('摘要：20 条取最近 8 条', head1.includes('最近 8 条'), head1)
+    check('摘要：窗口外的 12 条计入省略数', head1.includes('（更早的 12 条已省略）'), head1)
+
+    // ③ 字数预算不足 → 窗口外的条目与窗口内没装下的条目一起计入。
+    //    摘要行是 203 字符（昵称 1 + “: ” 2 + 正文 200），预算 1200 字符：
+    //    装得下 5 条，第 6 条因只剩 180 字符被拒。省略数 = 20 - 5 = 15 = 窗口外 12 + 窗口内 3。
+    for (let i = 0; i < 20; i++) await simA.execute({ text: 'x'.repeat(200), userId: 'test-user', nickname: '甲' })
+    const head2 = await wakeA()
+    check('摘要：预算不足时省略数含窗口外与窗口内两条来源', head2.includes('（更早的 15 条已省略）'), head2)
+
+    // ④ 省略数恰好 99 → 写数字。
+    for (let i = 0; i < 107; i++) await recordA()
+    const head3 = await wakeA()
+    check('摘要：省略数 99 写“更早的 99 条已省略”', head3.includes('（更早的 99 条已省略）'), head3)
+
+    // ⑤ 省略数恰好 100 → 写“大量消息”，正文里不再出现 100 这个数字。
+    for (let i = 0; i < 108; i++) await recordA()
+    const head4 = await wakeA()
+    check('摘要：省略数 100 写“更早的大量消息已省略”', head4.includes('（更早的大量消息已省略）'), head4)
+    check('摘要：省略数 100 时正文里没有 100 这个数字', !injectedA.includes('100'), head4)
+
+    // ⑥ 省略数 0 → 不加省略说明。
+    for (let i = 0; i < 5; i++) await recordA()
+    const head5 = await wakeA()
+    check('摘要：省略数 0 时不加省略说明', !injectedA.includes('已省略'), head5)
+
+    // ⑦ attachRecentChat=false → 摘要为空（行为不变）。
+    configA.attachRecentChat = false
+    for (let i = 0; i < 3; i++) await recordA()
+    const head6 = await wakeA()
+    check('摘要：attachRecentChat=false 时不拼摘要', !injectedA.includes('[QQ 未唤醒期间聊天记录'), head6)
+  } finally {
+    configA.attachRecentChat = true
+    rmSync(dirA, { recursive: true, force: true })
+  }
+}
+
+// ★ 投递返回的 rejected Promise 必须被接住：同一条台账条目改成 wake-failed，
+//   并写上“投递后这一轮失败：<原因>”。既不产生 unhandled rejection，也不向调用方抛。
+//   这一路**不回滚**闸门标志：投递已经真的把这一轮开起来了，标志已被正常消费。
+{
+  const originalTarget = resolvedSettings.targetSessionId
+  const originalConfigTarget = config.targetSessionId
+  const originalDelivery = resolvedSettings.delivery
+  const stateNow = async () => JSON.parse(await status.execute({}))
+  const lastLog = async () => {
+    const a = (await stateNow()).recentLog
+    return a[a.length - 1]
+  }
+  const fire = (type, data) => mainSessionHandler({ id: 'session-smoke' }, { type, data })
+  const tick = (ms = 15) => new Promise((r) => setTimeout(r, ms))
+  // unhandled rejection 的判定在微任务清空之后，所以监听必须在触发前挂上，断言前过一个宏任务。
+  const rejections = []
+  const onRejection = (reason) => rejections.push(reason)
+  process.on('unhandledRejection', onRejection)
+  try {
+    // 闸门归零：前面几块可能留下正在跑的一轮，或一个 QQ 来源标记。
+    fire('turn/end', { reason: { kind: 'completed' } })
+    fire('user/message', { source: { kind: 'user' } })
+
+    // ① followup 返回 rejected Promise。
+    resolvedSettings.targetSessionId = 'session-smoke'
+    config.targetSessionId = 'session-smoke'
+    fakeAgent = {
+      id: 'session-smoke',
+      status: 'idle',
+      ctx: { get: () => undefined, effect: () => () => {} },
+      followup: () => Promise.reject(new Error('这一轮炸了')),
+    }
+    let threw1 = false
+    let r1 = null
+    try {
+      r1 = JSON.parse(await sim.execute({ text: '244 在吗', userId: 'test-user' }))
+    } catch (error) {
+      threw1 = true
+      console.log('  异步失败时抛了：', String(error?.message ?? error))
+    }
+    check(
+      '异步失败：调用方不抛异常、仍返回可解析 JSON',
+      threw1 === false && typeof r1?.decision === 'object' && r1?.decision?.delivered === true,
+      JSON.stringify(r1?.decision),
+    )
+    await tick()
+    const log1 = await lastLog()
+    check('异步失败：台账最后一条 decision 是 wake-failed', log1?.decision === 'wake-failed', JSON.stringify(log1))
+    check('异步失败：error 含真实原因“这一轮炸了”', String(log1?.error ?? '').includes('这一轮炸了'), String(log1?.error))
+    check('异步失败：error 写的是“投递后这一轮失败”', String(log1?.error ?? '').includes('投递后这一轮失败'), String(log1?.error))
+    const g1 = await stateNow()
+    check(
+      '异步失败：闸门标志不回滚（这一轮已真的开起来）',
+      g1.gate.pendingFromQQ === true && g1.gate.currentTurnFromQQ === true,
+      JSON.stringify(g1.gate),
+    )
+
+    // ② steer 返回 rejected Promise：目标正忙 + delivery='auto' → 走 steer。
+    fire('turn/end', { reason: { kind: 'completed' } })
+    fire('user/message', { source: { kind: 'user' } })
+    let steered = 0
+    fakeAgent = {
+      id: 'session-smoke',
+      status: 'running',
+      ctx: { get: () => undefined, effect: () => () => {} },
+      steer: () => {
+        steered += 1
+        return Promise.reject(new Error('插话也炸了'))
+      },
+      followup: () => { throw new Error('这条用例不该走 followup') },
+    }
+    resolvedSettings.delivery = 'auto'
+    await sim.execute({ text: '244 在忙吗', userId: 'test-user' })
+    await tick()
+    const log2 = await lastLog()
+    check(
+      '异步失败：steer 返回 rejected Promise 同样被接住',
+      steered === 1 && log2?.decision === 'wake-failed',
+      JSON.stringify({ steered, log: log2 }),
+    )
+    check('异步失败：steer 那次的 error 也含真实原因', String(log2?.error ?? '').includes('插话也炸了'), String(log2?.error))
+
+    // ③ 异步失败之后，按正常时序走一轮 QQ 轮仍然能真的发出去。
+    fakeAgent = null
+    delete resolvedSettings.delivery
+    fire('turn/end', { reason: { kind: 'completed' } })
+    fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+    fire('turn/start', { turn: 12 })
+    fire('assistant/message', { message: { content: [{ type: 'text', text: '[QQ]异步失败之后照发[/QQ]' }] } })
+    fire('turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    check('异步失败之后：下一轮 QQ 轮仍能真的发出去', lastSentText() === '异步失败之后照发', JSON.stringify(sentTexts()))
+
+    // ④ 两条 rejected Promise 都不许变成 unhandled rejection。
+    check('异步失败：不产生 unhandled rejection', rejections.length === 0, `收集到 ${rejections.length} 条`)
+  } finally {
+    process.removeListener('unhandledRejection', onRejection)
+    resolvedSettings.targetSessionId = originalTarget
+    config.targetSessionId = originalConfigTarget
+    if (originalDelivery === undefined) delete resolvedSettings.delivery
+    else resolvedSettings.delivery = originalDelivery
+    fakeAgent = null
+    fire('turn/end', { reason: { kind: 'completed' } })
   }
 }
 

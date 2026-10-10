@@ -880,10 +880,15 @@ export function apply(ctx, config) {
       if (images.length >= MAX_BUFFER_IMAGES_TOTAL) break
     }
 
-    const omitted = picked.length - lines.length
+    // 省略数取**真实没进摘要**的条目数：`list` 是这一轮的缓冲快照，投递成功后整份快照都会被删，
+    // 窗口外的旧条目同样丢失。只数窗口内没装下的条目会把这部分漏掉，对模型报的丢失量偏小。
+    // `lines.length` 含被截断后仍然留下的那一条，这一点保持不变。
+    const omitted = list.length - lines.length
+    // 省略数大于 99 时不写数字，只写“大量消息”：不让一个巨大的数字进入上下文。
+    const omittedText = omitted > 99 ? '更早的大量消息已省略' : `更早的 ${omitted} 条已省略`
     const head =
       `[QQ 未唤醒期间聊天记录 · 最近 ${lines.length} 条` +
-      `${omitted > 0 ? `（更早的 ${omitted} 条已省略）` : ''}` +
+      `${omitted > 0 ? `（${omittedText}）` : ''}` +
       `${images.length > 0 ? `（含 ${images.length} 张图片，原位会跟一段描述）` : ''}]`
     return { text: `${head}\n${lines.join('\n')}\n[记录结束]\n\n`, images }
   }
@@ -1287,18 +1292,35 @@ export function apply(ctx, config) {
       if (wantSteer && typeof agent.steer === 'function') return agent.steer(injected)
       return agent.followup(injected)
     }
-    // withInitiator 抛错时改调 send()。那一次 send() 再抛也不能逃出本函数。
+    // withInitiator 抛错时改调 send()。两处的返回值都必须传出来：
+    // `followup()` / `steer()` 可能返回 rejected Promise，只有把返回值交给调用点才能挂上 catch。
+    // 那一次 send() 再抛也不能逃出本函数。
     const deliver = () => {
       try {
-        ctx.agents.withInitiator(agent, send)
+        return ctx.agents.withInitiator(agent, send)
       } catch {
-        send()
+        return send()
       }
     }
+    let delivered
     try {
-      deliver()
+      delivered = deliver()
     } catch (error) {
       return failWake(error)
+    }
+    // 同步投递成功、这一轮随后才失败：返回值是 rejected Promise。不接住它，既没有人记账，
+    // 也没有人处理，进程会报 unhandled rejection。
+    // 这一路**不回滚** pendingFromQQ / currentTurnFromQQ / claimedFromQQ：投递已经真的把这一轮
+    // 开起来了，三面标志已被这一轮正常消费。事后回滚会把归属改错，破坏下一轮。
+    //（failWake 的回滚只属于“投递根本没成功”的分支。）
+    if (delivered && typeof delivered.then === 'function') {
+      Promise.resolve(delivered).catch((error) => {
+        const reason = error?.message ?? String(error)
+        inboundLog.decision = 'wake-failed'
+        inboundLog.error = `投递后这一轮失败：${reason}`
+        saveState()
+        logger.warn(`投递后这一轮失败（${d.reason}）：${reason}`)
+      })
     }
     logger.info(`已投递 QQ 消息（${wantSteer ? 'steer 插话' : 'followup 排队'}${running ? '，目标正忙' : ''}）`)
     // 按快照过滤：快照里的条目**全部**移除（按对象身份比较）。

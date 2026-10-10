@@ -2,6 +2,24 @@
 
 ## 未发布
 
+- **未唤醒摘要的省略条数改为真实丢失量，超过 99 条写“大量消息”**：`renderDigest()` 的省略数
+  原来是 `picked.length - lines.length`，只数窗口内没装下的条目。窗口外（比 `recentChatLimit`
+  更早）的条目同样随快照一起删除，却没有计入，所以对模型报的丢失量偏小。
+  现在省略数取 `list.length - lines.length`：`list` 是传入的缓冲快照，`lines` 是真正写进摘要的行数。
+  `lines.length` 含被截断后仍然保留的那一条，这一点未变。
+  省略数大于 99 时只写“更早的大量消息已省略”，不写数字，避免巨大的数字进入上下文。
+  省略数为 0 时不加省略说明。`handleInbound()` 里按快照删除缓冲的行为未变。
+  README 的缓冲说明与上下文上限表同步。测试新增 9 条断言。测试总数 399 → 408。
+- **接住投递 Promise 的异步失败**：`handleInbound()` 的 `deliver()` 丢弃了
+  `agent.followup()` / `agent.steer()` 的返回值。该返回值是 rejected Promise 时，
+  既没有人接住它，也没有把台账改成 `wake-failed`，进程还会报 unhandled rejection。
+  现在 `deliver()` 把返回值传出来：`withInitiator` 的返回值是 thenable 时用它的返回值；
+  `withInitiator` 抛错后改调 `send()`，那一次的返回值同样传出来。
+  返回值是 thenable 时挂 `.catch()`：把同一条台账条目的 `decision` 改成 `wake-failed`，
+  `error` 写成“投递后这一轮失败：<原因>”，并调用 `saveState()` 与 `logger.warn`。
+  这一路不回滚 `pendingFromQQ` / `currentTurnFromQQ` / `claimedFromQQ`：投递已经真的把这一轮
+  开起来，三面标志已被这一轮正常消费，事后回滚会破坏下一轮的归属。
+  同步失败路径保持原样，两者都不向调用方抛。测试新增 9 条断言。测试总数 408 → 417。
 - **唤醒失败不再记账为成功**（严重）：`handleInbound()` 先前在 `d.action === 'wake'` 时就写了
   `decision: 'wake'` 的台账，之后 `ensureTargetAgent()` 抛错（未配置 `targetSessionId`、resume 失败）
   或投递抛错（`followup` / `steer` 抛错，含 `withInitiator` 失败后那次 `send()` 再抛）都会异常退出，
