@@ -2,6 +2,19 @@
 
 ## 未发布（v0.1.2 草稿）
 
+- **NapCat 启动改为按布局探测，并优先调用官方 launcher**（真机修复）：以前把路径写死成
+  `<安装目录>/bootmain/NapCatWinBootMain.exe`。用户把 `napcatInstallDir` 设成 `NapCat.Shell` 子目录时，
+  这条路径必然不存在，点“启动 NapCat”只会报“找不到 …，先跑 action:download”。
+  现在 `napcatPaths()` 按候选顺序探测，**OneKey 根与 `NapCat.Shell` 子目录两种布局都能解析**：
+  `shellDir` 取存在的 `<安装目录>/NapCat.Shell`，不存在时取 `<安装目录>`；
+  `bootMain` 依次取 `<shellDir>/bootmain/…`、`<安装目录>/bootmain/…`、`<shellDir>/NapCatWinBootMain.exe`；
+  新增 `shellDir`、`hookDll`、`launcherBat` 三个字段。
+  启动时优先执行官方 `launcher-win10.bat`（工作目录设为 `shellDir`）：该脚本自己读注册表找 QQ 路径，
+  非管理员时用 UAC 自我提权，所以**可能弹出 UAC 窗口**。
+  没有 launcher 脚本时才直接调用引导器，参数改为官方顺序
+  `<bootMain> <QQ.exe 路径> <hook.dll> [-q <QQ号>]`；以前只传了 `<bootMain> <QQ号>`，
+  并且工作目录是 `bootmain`，路径即使对也起不来。
+  错误信息现在写明**期望路径**与**下一步动作**，且不含 token 值。
 - **设置卡片新增 3 个操作按钮**：展开卡片后可以**打开 WebUI**、**启动 NapCat**、**打开文件夹**。
   打开 WebUI 的地址由 `<安装目录>/config/webui.json` 里的 host / port / token 拼成（没读到就禁用并写明原因）；
   启动复用 `qq_bridge_napcat` 的 launch；打开文件夹按系统调用 `explorer.exe` / `open` / `xdg-open`。

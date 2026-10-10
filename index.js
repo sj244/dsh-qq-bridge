@@ -2025,14 +2025,59 @@ export function apply(ctx, config) {
   function napcatLaunch() {
     const { s, paths } = napcatPathsNow()
     if (napcatProc !== null) throw new Error('NapCat 已经由本插件启动过了（先 action:"stop"）')
-    if (!existsSync(paths.bootMain)) throw new Error(`找不到 ${paths.bootMain}，先跑 action:"download"`)
+
+    // 守卫一：启动文件缺失。有 launcher 脚本就能启动；没有则要求引导器与 hook 都在。
+    if (paths.launcherBat === '' && !existsSync(paths.bootMain)) {
+      throw new Error(
+        '找不到 NapCat 启动器，已查找：\n' +
+          `  ${join(paths.shellDir, 'launcher-win10.bat')}（官方 launcher，优先）\n` +
+          `  ${paths.bootMain}\n` +
+          '下一步：先调用 action:"download" 解包，或把设置里的 napcatInstallDir 指向 NapCat 目录' +
+          '（OneKey 根或它下面的 NapCat.Shell 都行）。',
+      )
+    }
+    if (paths.launcherBat === '' && !existsSync(paths.hookDll)) {
+      throw new Error(
+        `找不到注入 hook：${paths.hookDll}\n下一步：重新调用 action:"download" 解包完整包` +
+          '（hook 与 bootmain 必须在同一个解包目录里）。',
+      )
+    }
+
+    // 守卫二：没有 subprocess 服务就没法起进程。
     const subprocess = ctx.get('subprocess')
     if (!subprocess) throw new Error('这个 profile 没有 subprocess 服务，无法启动 NapCat')
 
-    const argv = [paths.bootMain, ...(s.qqNumber !== '' ? [s.qqNumber] : [])]
+    // 额外参数：NapCat 的快速登录用 `-q <QQ号>`。未设置 QQ 号时不传，由用户手动扫码。
+    const qqArgs = s.qqNumber !== '' ? ['-q', s.qqNumber] : []
+    let argv
+    let launched
+    let mode
+
+    if (paths.launcherBat !== '') {
+      // 优先走官方 launcher：它自己按注册表找 QQ 路径，也在非管理员时用 UAC 自我提权。
+      // 因此这里只传 bat 与额外参数，**不传 QQ 路径与 hook**（bat 内部自己拼）。
+      argv = [process.env.COMSPEC || 'cmd.exe', '/c', paths.launcherBat, ...qqArgs]
+      launched = paths.launcherBat
+      mode = 'launcher-bat'
+    } else {
+      // 没有 launcher 脚本时直接调引导器：argv 必须是 <bootMain> <QQ.exe> <hook.dll> [额外参数]。
+      const qq = detectQq()
+      if (!qq.primary) {
+        throw new Error(
+          '找不到 QQ.exe，无法直接调用 NapCatWinBootMain.exe（只查了常见安装位置）。\n' +
+            '下一步：先手动启动并登录一次 QQ NT；或者恢复 NapCat.Shell 里的 launcher-win10.bat，' +
+            'launcher 自己会读注册表找 QQ 路径。',
+        )
+      }
+      argv = [paths.bootMain, qq.primary, paths.hookDll, ...qqArgs]
+      launched = paths.bootMain
+      mode = 'bootmain'
+    }
+
     const handle = subprocess.spawn({
       argv,
-      cwd: paths.bootDir,
+      // cwd 必须是 NapCat.Shell：launcher 里的 %cd% 用它找 hook 与 qqnt.json。
+      cwd: paths.shellDir,
       // 注意：stdin 没有 'inherit' 这个取值；输出用 inherit 让 NapCat 的日志
       // （含 WebUI 随机 token）出现在 DSH 宿主的控制台上。
       stdio: { stdin: 'ignore', stdout: 'inherit', stderr: 'inherit' },
@@ -2046,9 +2091,13 @@ export function apply(ctx, config) {
     handle.done.then((o) => clear(`exit=${o.exitCode} signal=${o.signal ?? '-'}`)).catch((e) => clear(`异常 ${e?.message ?? e}`))
 
     return {
-      launched: paths.bootMain,
+      launched,
+      mode,
       qqNumber: s.qqNumber || '(未设置 → 需要你手动扫码登录一次)',
       notes: [
+        mode === 'launcher-bat'
+          ? '走官方 launcher 脚本：它可能弹 UAC 提权窗口，请在系统弹窗里点“是”。'
+          : '直接调用 NapCatWinBootMain.exe（没找到官方 launcher 脚本）。',
         '首次登录必须手动（扫码/密码），NapCat 官方也要求「登录过一次」才能用 QQ 号快速登录。',
         'NapCat 的 WebUI 地址与随机 token 会打在它的控制台输出里，也可读 config/webui.json。',
         '⚠️ 这个进程由 DSH 的 subprocess 服务托管：插件被卸载或 DSH 退出时会一并结束。',

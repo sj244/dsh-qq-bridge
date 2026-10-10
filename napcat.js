@@ -370,17 +370,18 @@ export function readOneBotConfig(configDir) {
 /**
  * NapCat 的 config 目录可能落在几个地方，取决于安装方式：
  *   - OneKey 解包出来的根目录下的 `config/`（如果整个目录被搬过去）
+ *   - `NapCat.Shell` 子目录下的 `config/`（用户把安装目录设成该子目录时）
  *   - QQ 安装目录里 NapCat 自己的数据目录（安装器安装后的常见落点）
  * 这里只做**候选列举 + 存在性判断**，不猜、不乱写。
  */
 export function configDirCandidates({ installDir, qqPath = null }) {
-  const list = [join(installDir, 'config')]
+  const list = [join(napcatPaths(installDir).shellDir, 'config'), join(installDir, 'config')]
   if (qqPath) {
     const qqDir = dirname(qqPath)
     list.push(join(qqDir, 'resources', 'app', 'app_launcher', 'napcat', 'config'))
     list.push(join(qqDir, 'resources', 'app', 'napcat', 'config'))
   }
-  return list.map((dir) => ({
+  return [...new Set(list)].map((dir) => ({
     dir,
     exists: existsSync(dir),
     hasOneBot: existsSync(join(dir, 'onebot11.json')),
@@ -417,15 +418,61 @@ export function defaultInstallDir(home) {
   return join(home, 'napcat')
 }
 
-/** 安装目录里的固定相对位置。 */
+/** 取第一个存在的路径；都不存在时返回 null。 */
+function firstExisting(list) {
+  for (const p of list) {
+    if (existsSync(p)) return p
+  }
+  return null
+}
+
+/**
+ * 解析安装目录里的各个位置。
+ *
+ * `installDir` 允许是两种布局（真机上都出现过）：
+ *   - **OneKey 根**：`<installDir>/bootmain/NapCatWinBootMain.exe`，`<installDir>/config/`。
+ *   - **NapCat.Shell 子目录**：用户把 `napcatInstallDir` 直接设成 `<installDir>/NapCat.Shell`。
+ *
+ * 因此每个位置都按候选顺序探测，**只取存在的那个**；都不存在时返回最可能的期望路径，
+ * 让错误信息能写清"期望路径"。`launcherBat` 不存在时为空串。
+ */
 export function napcatPaths(installDir) {
+  // 先定 shellDir：OneKey 根下若真有 NapCat.Shell，官方 launcher 与 config 都在它里面。
+  const shellSub = join(installDir, 'NapCat.Shell')
+  const shellDir = existsSync(shellSub) ? shellSub : installDir
+
+  const bootMain =
+    firstExisting([
+      join(shellDir, 'bootmain', 'NapCatWinBootMain.exe'),
+      join(installDir, 'bootmain', 'NapCatWinBootMain.exe'),
+      join(shellDir, 'NapCatWinBootMain.exe'),
+    ]) ?? join(shellDir, 'bootmain', 'NapCatWinBootMain.exe')
+  const bootDir = dirname(bootMain)
+
+  const hookDll =
+    firstExisting([join(shellDir, 'NapCatWinBootHook.dll'), join(bootDir, 'NapCatWinBootHook.dll')]) ??
+    join(shellDir, 'NapCatWinBootHook.dll')
+
+  const launcherBat =
+    firstExisting([
+      join(shellDir, 'launcher-win10.bat'),
+      join(shellDir, 'launcher.bat'),
+      join(installDir, 'bootmain', 'napcat.bat'),
+    ]) ?? ''
+
+  const configDir =
+    firstExisting([join(shellDir, 'config'), join(installDir, 'config')]) ?? join(shellDir, 'config')
+
   return {
     installDir,
-    bootMain: join(installDir, 'bootmain', 'NapCatWinBootMain.exe'),
-    bootDir: join(installDir, 'bootmain'),
+    shellDir,
+    bootMain,
+    bootDir,
+    hookDll,
+    launcherBat,
     installer: join(installDir, 'NapCatInstaller.exe'),
     zipPath: join(installDir, 'napcat-onekey.zip'),
-    configDir: join(installDir, 'config'),
+    configDir,
   }
 }
 

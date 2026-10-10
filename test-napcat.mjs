@@ -287,10 +287,100 @@ check('包含匹配资产', pickAsset(assets, 'Framework').url === 'u1')
   check('默认安装目录 = <home>/napcat', dir === join('C:\\x\\.dsh', 'napcat'), dir)
 
   const paths = napcatPaths(dir)
-  check('bootMain 路径正确', paths.bootMain.endsWith(join('bootmain', 'NapCatWinBootMain.exe')), paths.bootMain)
+  check(
+    '都不存在时 bootMain 仍给出期望路径 <installDir>/bootmain/NapCatWinBootMain.exe',
+    paths.bootMain === join(dir, 'bootmain', 'NapCatWinBootMain.exe'),
+    paths.bootMain,
+  )
+  check('都不存在时 shellDir = installDir', paths.shellDir === dir, paths.shellDir)
+  check('都不存在时 launcherBat 为空串', paths.launcherBat === '', JSON.stringify(paths.launcherBat))
   check('未安装时 isNapcatInstalled = false', isNapcatInstalled(dir) === false)
 
-  // 造一个"已安装"的目录
+  // 布局 A：installDir = OneKey 根（bootmain/ 直接在根下，没有 NapCat.Shell）
+  {
+    const root = join(work, 'layout-onekey-root')
+    mkdirSync(join(root, 'bootmain'), { recursive: true })
+    writeFileSync(join(root, 'bootmain', 'NapCatWinBootMain.exe'), 'stub')
+    writeFileSync(join(root, 'bootmain', 'napcat.bat'), 'stub')
+    const p = napcatPaths(root)
+    check('OneKey 根：shellDir = 安装目录', p.shellDir === root, p.shellDir)
+    check(
+      'OneKey 根：bootMain = <installDir>/bootmain/NapCatWinBootMain.exe',
+      p.bootMain === join(root, 'bootmain', 'NapCatWinBootMain.exe'),
+      p.bootMain,
+    )
+    check('OneKey 根：bootDir = <installDir>/bootmain', p.bootDir === join(root, 'bootmain'), p.bootDir)
+    check(
+      'OneKey 根：launcherBat 回落到 <installDir>/bootmain/napcat.bat',
+      p.launcherBat === join(root, 'bootmain', 'napcat.bat'),
+      p.launcherBat,
+    )
+    check('OneKey 根：configDir = <installDir>/config', p.configDir === join(root, 'config'), p.configDir)
+    check('OneKey 根：isNapcatInstalled = true', isNapcatInstalled(root) === true)
+  }
+
+  // 布局 B：installDir = NapCat.Shell 子目录（真机报障时用户设的就是这个）
+  {
+    const shell = join(work, 'layout-shell', 'NapCat.Shell')
+    mkdirSync(join(shell, 'config'), { recursive: true })
+    writeFileSync(join(shell, 'NapCatWinBootMain.exe'), 'stub')
+    writeFileSync(join(shell, 'NapCatWinBootHook.dll'), 'stub')
+    writeFileSync(join(shell, 'launcher-win10.bat'), 'stub')
+    const p = napcatPaths(shell)
+    check('NapCat.Shell：shellDir = 该目录', p.shellDir === shell, p.shellDir)
+    check(
+      'NapCat.Shell：bootMain = <shellDir>/NapCatWinBootMain.exe',
+      p.bootMain === join(shell, 'NapCatWinBootMain.exe'),
+      p.bootMain,
+    )
+    check('NapCat.Shell：bootDir = shellDir', p.bootDir === shell, p.bootDir)
+    check(
+      'NapCat.Shell：hookDll = <shellDir>/NapCatWinBootHook.dll',
+      p.hookDll === join(shell, 'NapCatWinBootHook.dll'),
+      p.hookDll,
+    )
+    check(
+      'NapCat.Shell：launcherBat = <shellDir>/launcher-win10.bat',
+      p.launcherBat === join(shell, 'launcher-win10.bat'),
+      p.launcherBat,
+    )
+    check('NapCat.Shell：configDir = <shellDir>/config', p.configDir === join(shell, 'config'), p.configDir)
+    check('NapCat.Shell：isNapcatInstalled = true', isNapcatInstalled(shell) === true)
+  }
+
+  // 布局 C：installDir = OneKey 根，但根下另有 NapCat.Shell 子目录 —— shellDir 取子目录，
+  //         而 bootMain 缺 `NapCat.Shell/bootmain/` 时回落到根下的 `bootmain/`。
+  {
+    const root = join(work, 'layout-mixed')
+    const shell = join(root, 'NapCat.Shell')
+    mkdirSync(join(root, 'bootmain'), { recursive: true })
+    mkdirSync(shell, { recursive: true })
+    writeFileSync(join(root, 'bootmain', 'NapCatWinBootMain.exe'), 'stub')
+    writeFileSync(join(shell, 'NapCatWinBootMain.exe'), 'stub')
+    writeFileSync(join(shell, 'NapCatWinBootHook.dll'), 'stub')
+    writeFileSync(join(shell, 'launcher-win10.bat'), 'stub')
+    const p = napcatPaths(root)
+    check('混合布局：shellDir 取 <installDir>/NapCat.Shell', p.shellDir === shell, p.shellDir)
+    check(
+      '混合布局：bootMain 回落到 <installDir>/bootmain/NapCatWinBootMain.exe',
+      p.bootMain === join(root, 'bootmain', 'NapCatWinBootMain.exe'),
+      p.bootMain,
+    )
+    check('混合布局：bootDir = <installDir>/bootmain', p.bootDir === join(root, 'bootmain'), p.bootDir)
+    check(
+      '混合布局：hookDll = <shellDir>/NapCatWinBootHook.dll',
+      p.hookDll === join(shell, 'NapCatWinBootHook.dll'),
+      p.hookDll,
+    )
+    check(
+      '混合布局：launcherBat = <shellDir>/launcher-win10.bat',
+      p.launcherBat === join(shell, 'launcher-win10.bat'),
+      p.launcherBat,
+    )
+    check('混合布局：isNapcatInstalled = true', isNapcatInstalled(root) === true)
+  }
+
+  // 造一个"已安装"的目录（配置与 bootmain 都在根下）
   const fake = join(work, 'fake-install')
   writeOneBotConfig({ configDir: join(fake, 'config'), port: 1 })
   mkdirSync(join(fake, 'bootmain'), { recursive: true })

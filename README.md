@@ -146,6 +146,14 @@ QQ 消息 ─┬─ 不在白名单 ──────────────�
 | 4 | `{ action: "configure" }` | 写 `config/onebot11.json`，把正向 WS 端口和 token 配好（**不用打开 WebUI**） |
 | 5 | `{ action: "launch" }` | 启动 NapCat（首次仍需扫码登录） |
 
+安装目录可以是 OneKey 根，也可以是 OneKey 根下的 `NapCat.Shell` 子目录；两种布局都能识别。
+
+**启动优先走官方 launcher**：目录里存在 `launcher-win10.bat`（或 `launcher.bat`）时，插件用
+`cmd /c` 调用这个 bat 脚本，工作目录设为 `NapCat.Shell`。脚本自己读注册表找 QQ 路径，非管理员时用
+UAC 自我提权，因此**可能弹出 UAC 窗口**，需要在系统弹窗里点“是”。
+没有 launcher 脚本时，插件直接调用 `NapCatWinBootMain.exe`，并按官方参数顺序传入
+QQ 路径与 `NapCatWinBootHook.dll`；此时 QQ 路径取不到会明确报错，先手动安装并登录一次 QQ NT 即可。
+
 **第 3 步必须手动执行的原因**：
 
 - `NapCatInstaller.exe` 是**交互式控制台程序**。DSH 的 `SubprocessStdio.stdin` 只支持
@@ -255,7 +263,8 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 - **打开 WebUI**：用系统默认浏览器打开 NapCat 的 WebUI。地址由 `<安装目录>/config/webui.json` 里的
   host / port / token 拼成；没读到该文件时按钮禁用，旁边显示“没读到 webui.json”。
-- **启动 NapCat**：与工具 `qq_bridge_napcat` 的 `launch` 是同一个动作。
+- **启动 NapCat**：与工具 `qq_bridge_napcat` 的 `launch` 是同一个动作。目录里有官方
+  `launcher-win10.bat` 时优先调用该脚本，脚本会自我提权，**可能弹出 UAC 窗口**。
 - **打开文件夹**：用系统文件管理器打开 NapCat 安装目录（Windows 用 `explorer.exe`，macOS 用 `open`，
   Linux 用 `xdg-open`）。
 
