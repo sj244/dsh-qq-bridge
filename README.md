@@ -251,6 +251,17 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 卡片照常可以使用；`cordis.patch.yml` 也仍然可以修改（改完重启生效，且会被上面的设置文件覆盖）。
 > 接口只接受本机请求（非 loopback 一律 403），且只写 schema 白名单里的键。
 
+卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
+
+- **打开 WebUI**：用系统默认浏览器打开 NapCat 的 WebUI。地址由 `<安装目录>/config/webui.json` 里的
+  host / port / token 拼成；没读到该文件时按钮禁用，旁边显示“没读到 webui.json”。
+- **启动 NapCat**：与工具 `qq_bridge_napcat` 的 `launch` 是同一个动作。
+- **打开文件夹**：用系统文件管理器打开 NapCat 安装目录（Windows 用 `explorer.exe`，macOS 用 `open`，
+  Linux 用 `xdg-open`）。
+
+这 3 个按钮走本机接口 `GET /api/qq-bridge/napcat`、`POST /api/qq-bridge/napcat/launch`、
+`POST /api/qq-bridge/napcat/reveal`：非本机请求一律 403，请求进行中按钮禁用，token 只拼进 URL 不写日志。
+
 修改**出站方式**会立刻重挂注入给目标会话的用法说明：提示词正文按模式分叉，
 不重挂时模型会按本部署里已经不生效的做法回话。
 

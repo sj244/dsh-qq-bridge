@@ -11,6 +11,7 @@
 //     出站文本按 replyMaxChars 分段发给「最后一次入站的目的地」。
 //     传输细节（内置 WebSocket、token 走查询串、退避重连）全部封装在 onebot.js。
 
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -2063,6 +2064,132 @@ export function apply(ctx, config) {
     if (napcatProc === handle) napcatProc = null
     return { stopped: true }
   }
+
+  // ── 卡片上的三个操作按钮（打开 WebUI / 启动 NapCat / 打开文件夹）─────────────
+  //
+  // ⚠️ 这三条路由**不受 legacySettings 门控**：它们只管启动与打开，跟"设置值存在哪"无关，
+  //    两代宿主都要挂。仍然只服务本机 —— 它们能启动进程、能开文件管理器。
+
+  /**
+   * 读 NapCat 的 WebUI 地址（`<configDir>/webui.json`）。
+   *
+   * configDir 的取法与 napcatConfigure 一致：安装目录里没有 `config/` 时，用 QQ 那边已有的那个。
+   * 返回值里**只有布尔量**说明 token 有没有；token 本身只拼进 webuiUrl，绝不写日志。
+   */
+  function readNapcatWebui() {
+    const s = readSettings()
+    const installDir = s.napcatInstallDir || defaultInstallDir(home)
+    const hit = configDirCandidates({ installDir, qqPath: null }).find((c) => c.hasWebUi === true)
+    const configDir = hit ? hit.dir : napcatPaths(installDir).configDir
+    let cfg
+    try {
+      const parsed = JSON.parse(readFileSync(join(configDir, 'webui.json'), 'utf8'))
+      cfg = parsed && typeof parsed === 'object' ? parsed : undefined
+    } catch {
+      // 文件不存在或不是 JSON 都当"没读到" —— 卡片上会显示"没读到 webui.json"。
+      cfg = undefined
+    }
+    const host = String(cfg?.host || '127.0.0.1')
+    const port = Number(cfg?.port ?? 6099) || 6099
+    const token = typeof cfg?.token === 'string' ? cfg.token : ''
+    return {
+      ok: true,
+      installDir,
+      configDir,
+      configFound: cfg !== undefined,
+      port,
+      hasToken: token !== '',
+      webuiUrl: `http://${host}:${port}/webui${token === '' ? '' : `?token=${encodeURIComponent(token)}`}`,
+    }
+  }
+
+  /** 用系统文件管理器打开安装目录。Windows 用 explorer.exe，macOS 用 open，Linux 用 xdg-open。 */
+  function revealNapcatDir() {
+    const s = readSettings()
+    const installDir = s.napcatInstallDir || defaultInstallDir(home)
+    if (!existsSync(installDir)) throw new Error(`目录不存在：${installDir}`)
+    const command =
+      process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+    const child = spawn(command, [installDir], { detached: true, stdio: 'ignore' })
+    // spawn 失败是异步的：不接 error 事件会变成未处理异常，把宿主一起带走。
+    child.on('error', (error) => logger.warn(`打开文件夹失败：${error?.message ?? error}`))
+    child.unref()
+    return installDir
+  }
+
+  /**
+   * 一个按钮 = 一条 exact 路由。统一在这里做两件事：只服务本机；动作失败也只回 JSON。
+   * 动作失败用 200 + `{ ok: false, error }` —— 请求本身成功了，是动作没成。
+   */
+  function napcatRoute(method, run) {
+    return async (req, res) => {
+      if (!isLoopback(req)) {
+        logger.warn(`napcat 接口拒绝了非本机请求（${req?.socket?.remoteAddress ?? '?'}）`)
+        return sendJson(res, 403, { ok: false, error: 'loopback-only' })
+      }
+      if (String(req.method ?? '').toUpperCase() !== method) {
+        return sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
+      }
+      try {
+        return sendJson(res, 200, await run())
+      } catch (error) {
+        return sendJson(res, 200, { ok: false, error: String(error?.message ?? error) })
+      }
+    }
+  }
+
+  // TODO: accessTokenEnv 留空时，可回退读 NapCat 的 onebot11*.json 里的 token（用户说可做可不做）。
+  // 可选注入：没有 webServer 服务的部署照常工作（只是卡片上的按钮拿不到地址）。
+  if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (scoped) => {
+    const server = scoped?.webServer
+    if (!server || typeof server.register !== 'function') return
+    const disposes = []
+    try {
+      const routes = [
+        [
+          '/api/qq-bridge/napcat',
+          napcatRoute('GET', () => {
+            const info = readNapcatWebui()
+            return { ...info, installed: isNapcatInstalled(info.installDir) }
+          }),
+        ],
+        [
+          '/api/qq-bridge/napcat/launch',
+          napcatRoute('POST', () => {
+            const result = napcatLaunch()
+            return { ...result, ok: true, message: `已启动 NapCat：${result.launched}` }
+          }),
+        ],
+        [
+          '/api/qq-bridge/napcat/reveal',
+          napcatRoute('POST', () => {
+            revealNapcatDir()
+            return { ok: true }
+          }),
+        ],
+      ]
+      for (const [path, handler] of routes) disposes.push(server.register({ kind: 'exact', path, handler }))
+      scoped.effect(() => () => {
+        for (const dispose of disposes) {
+          try {
+            dispose()
+          } catch {
+            // 卸载时路由可能已经不在了，忽略
+          }
+        }
+      })
+      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}（仅本机）')
+    } catch (error) {
+      for (const dispose of disposes) {
+        try {
+          dispose()
+        } catch {
+          // 忽略
+        }
+      }
+      logger.warn(`NapCat 操作接口挂载失败（可能同路径已被占用）：${error?.message ?? error}`)
+    }
+  })
 
   // 这个工具**不受 debugTools 开关限制**：它是本插件的"一键"入口，不是调试工具。
   ctx.tools.register(defineTool({

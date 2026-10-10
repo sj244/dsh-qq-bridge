@@ -2,6 +2,12 @@
 
 ## 未发布（v0.1.2 草稿）
 
+- **设置卡片新增 3 个操作按钮**：展开卡片后可以**打开 WebUI**、**启动 NapCat**、**打开文件夹**。
+  打开 WebUI 的地址由 `<安装目录>/config/webui.json` 里的 host / port / token 拼成（没读到就禁用并写明原因）；
+  启动复用 `qq_bridge_napcat` 的 launch；打开文件夹按系统调用 `explorer.exe` / `open` / `xdg-open`。
+  宿主半新挂 `GET /api/qq-bridge/napcat` 与 `POST /api/qq-bridge/napcat/launch|reveal` 三条
+  **不受 legacy 门控**的路由（两代宿主都有），只服务本机：非 loopback 一律 403。
+  token 只拼进 URL，不写日志。
 - **出站更新（二次确认）**：工具模式下不是 QQ 唤醒的那一轮不再"硬拒绝"：第一次调用只回一句确认、
   **不会发出去**，同一轮里**再调一次**才真的发（确认状态按轮清零，不会跨轮泄漏；非 QQ 轮的发送在
   outbox 里标 `nonQQTurn: true`）。

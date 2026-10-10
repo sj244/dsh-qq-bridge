@@ -2,7 +2,9 @@
 //  (1) apply 不抛错、注册了 2 个调试工具；
 //  (2) 唤醒策略三条分支（白名单外丢弃 / 昵称必唤醒 / 其余按概率）；
 // 运行：node test-smoke.mjs
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
@@ -86,6 +88,14 @@ apply(ctx, config)
 // 挂上去只会是"改了不生效"的死接口。⚠️ 这条必须在**其它假 ctx 跑 apply 之前**断言 ——
 // 后面那些 `{...ctx}` 会继承主 ctx 的 webServer，往同一个数组里塞路由（第一版就被污染了）。
 check('legacy 宿主上不挂设置路由', !capturedRoutes.some((r) => r.path === '/api/qq-bridge/settings'))
+// 三个操作按钮**不**受 legacy 门控：它们只管启动与打开，跟"设置值存在哪"无关，两代宿主都要挂。
+check(
+  'legacy 宿主上也挂 napcat 操作路由（打开 WebUI / 启动 / 打开文件夹）',
+  ['/api/qq-bridge/napcat', '/api/qq-bridge/napcat/launch', '/api/qq-bridge/napcat/reveal'].every((p) =>
+    capturedRoutes.some((r) => r.path === p && r.kind === 'exact' && typeof r.handler === 'function'),
+  ),
+  JSON.stringify(capturedRoutes.map((r) => r.path)),
+)
 console.log('registered tools:', registered.map((t) => t.name).join(', '))
 check('apply 未抛错且注册了 6 个工具', registered.length === 6)
 
@@ -1058,6 +1068,96 @@ if (sim) {
     )
     check('读到的 overridden 已不含被清掉的键', cleared.overridden?.includes('nicknames') !== true, JSON.stringify(cleared.overridden))
   }
+}
+
+// M6：卡片上的三个操作按钮 —— 宿主接口。造一份真的 webui.json，直接调路由处理函数。
+{
+  const installDir = mkdtempSync(join(tmpdir(), 'qq-bridge-webui-'))
+  mkdirSync(join(installDir, 'config'), { recursive: true })
+  writeFileSync(
+    join(installDir, 'config', 'webui.json'),
+    `${JSON.stringify({ host: '127.0.0.1', port: 6099, token: 'tok123' })}\n`,
+    'utf8',
+  )
+
+  const routes = []
+  // 非 legacy（0.2.0 形态）宿主：设置从自己的文件读，napcatInstallDir 从 config 回落。
+  const napcatCtx = {
+    ...ctx,
+    settings: { describe: () => [], update: async () => {}, configure: () => () => {} },
+    webServer: { register: (route) => { routes.push(route); return () => {} } },
+  }
+  napcatCtx.inject = (_deps, cb) => cb(napcatCtx)
+  // statePath 单独一个：设置文件也跟着落在另一个路径，napcatInstallDir 必定从 config 回落。
+  apply(napcatCtx, {
+    ...config,
+    statePath: process.env.TEMP + '/qq-bridge-smoke-buttons.json',
+    napcatInstallDir: installDir,
+  })
+
+  const handlerFor = (path) => routes.find((r) => r.path === path)?.handler
+  const makeRes = () => {
+    const out = { status: 0, body: '' }
+    return { out, writeHead: (status) => { out.status = status }, end: (body) => { out.body = String(body ?? '') } }
+  }
+  const req = (method, { addr = '127.0.0.1', url = '' } = {}) => ({
+    method,
+    url,
+    socket: { remoteAddress: addr },
+    async *[Symbol.asyncIterator]() {},
+  })
+
+  const napcatGet = handlerFor('/api/qq-bridge/napcat')
+  const res1 = makeRes()
+  await napcatGet(req('GET', { url: '/api/qq-bridge/napcat' }), res1)
+  const got = JSON.parse(res1.out.body)
+  check(
+    'GET /napcat：读到 webui.json，URL 带 token，端口与 hasToken 都对',
+    res1.out.status === 200 &&
+      got.ok === true &&
+      got.configFound === true &&
+      got.port === 6099 &&
+      got.hasToken === true &&
+      String(got.webuiUrl).includes('token=tok123'),
+    res1.out.body.slice(0, 160),
+  )
+  check(
+    'GET /napcat：installed 按同一个 installDir 判定（空目录 = false）',
+    got.installed === false,
+    String(got.installed),
+  )
+
+  const res2 = makeRes()
+  await napcatGet(req('GET', { addr: '10.0.0.9', url: '/api/qq-bridge/napcat' }), res2)
+  check('GET /napcat：非本机请求 403', res2.out.status === 403, String(res2.out.status))
+
+  const napcatLaunchRoute = handlerFor('/api/qq-bridge/napcat/launch')
+  const res3 = makeRes()
+  await napcatLaunchRoute(req('POST', { addr: '10.0.0.9', url: '/api/qq-bridge/napcat/launch' }), res3)
+  check('POST /napcat/launch：非本机请求 403', res3.out.status === 403, String(res3.out.status))
+
+  // launch / reveal 在测试机上必然失败（没有 NapCat，也不该真去开文件管理器），
+  // 但必须**回 JSON 而不是抛** —— 抛出去会让宿主那条请求挂死。
+  // 这里用 legacy 那份路由：它的 installDir 是不存在的目录，所以 reveal 不会真的启动进程。
+  const legacyReveal = capturedRoutes.find((r) => r.path === '/api/qq-bridge/napcat/reveal')?.handler
+  const legacyLaunch = capturedRoutes.find((r) => r.path === '/api/qq-bridge/napcat/launch')?.handler
+  for (const [label, handler] of [['reveal', legacyReveal], ['launch', legacyLaunch]]) {
+    const res = makeRes()
+    await handler(req('POST', { url: `/api/qq-bridge/napcat/${label}` }), res)
+    let body = null
+    try {
+      body = JSON.parse(res.out.body)
+    } catch {
+      body = null
+    }
+    check(
+      `POST /napcat/${label}：返回 JSON 且有 ok 字段（测试环境允许 ok:false）`,
+      typeof body?.ok === 'boolean',
+      `${res.out.status} ${String(res.out.body).slice(0, 120)}`,
+    )
+  }
+
+  rmSync(installDir, { recursive: true, force: true })
 }
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)

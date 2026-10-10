@@ -271,6 +271,7 @@ window.__ModuleLoader__.load({
       note: { fontSize: '12px', opacity: 0.7 },
       err: { fontSize: '12px', color: '#e5534b' },
       overridden: { fontSize: '11px', opacity: 0.5, marginLeft: '4px' },
+      ops: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
     }
 
     function disabled(btn, off) {
@@ -291,6 +292,9 @@ window.__ModuleLoader__.load({
       const [note, setNote] = react.useState('')
       // 折叠块：跟官方那几张卡片一致 —— 默认收起
       const [open, setOpen] = react.useState(false)
+      // NapCat 的三个操作按钮：展开时拉一次接口；拿不到就保持 null（按钮禁用）。
+      const [napcat, setNapcat] = react.useState(null)
+      const [napcatBusy, setNapcatBusy] = react.useState('')
 
       const current = react.useMemo(() => draftFrom(snap.value), [snap.value])
       const shown = draft ?? current
@@ -330,6 +334,42 @@ window.__ModuleLoader__.load({
         }
       }, [wsStore])
       const workspaceSnapshot = react.useSyncExternalStore(wsSubscribe, wsGetSnapshot)
+
+      // 展开卡片时读一次 NapCat 的 WebUI 地址（「打开 WebUI」要用）。
+      // 没有 fetch 的环境静默保持 null，按钮自己禁用，卡片其余部分照常可用。
+      react.useEffect(() => {
+        if (!open || typeof fetch !== 'function') return undefined
+        let alive = true
+        fetch(NAPCAT_API, { headers: { accept: 'application/json' } })
+          .then((res) => res.json().catch(() => ({})))
+          .then((body) => {
+            if (alive) setNapcat(body && body.ok === true ? body : null)
+          })
+          .catch(() => {
+            if (alive) setNapcat(null)
+          })
+        return () => {
+          alive = false
+        }
+      }, [open])
+
+      /** 两个 POST 按钮共用：动作没成（ok:false）也把宿主的 error 原文显示出来。 */
+      async function postNapcat(action, okNote) {
+        setNapcatBusy(action)
+        setError('')
+        setNote('')
+        try {
+          if (typeof fetch !== 'function') throw new Error('这个环境没有 fetch')
+          const res = await fetch(`${NAPCAT_API}/${action}`, { method: 'POST' })
+          const body = await res.json().catch(() => ({}))
+          if (!res.ok || body?.ok !== true) throw new Error(String(body?.error || `HTTP ${res.status}`))
+          setNote(String(body?.message || okNote))
+        } catch (e) {
+          setError(String((e && e.message) || e))
+        } finally {
+          setNapcatBusy('')
+        }
+      }
 
       function change(key) {
         return (event) => {
@@ -455,6 +495,47 @@ window.__ModuleLoader__.load({
         )
       }
 
+      // 「打开 WebUI」只在真读到 webui.json 时可点 —— 地址里带着 token，不给猜的余地。
+      const webuiUrl = napcat && typeof napcat.webuiUrl === 'string' ? napcat.webuiUrl : ''
+      const napcatOps = h(
+        'div',
+        { style: S.ops },
+        h(
+          'button',
+          {
+            type: 'button',
+            style: disabled(S.btn, webuiUrl === '' || napcatBusy !== ''),
+            disabled: webuiUrl === '' || napcatBusy !== '',
+            onClick: () => {
+              if (webuiUrl !== '') window.open(webuiUrl, '_blank', 'noopener')
+            },
+          },
+          '打开 WebUI',
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            style: disabled(S.btn, napcatBusy !== ''),
+            disabled: napcatBusy !== '',
+            onClick: () => postNapcat('launch', '已启动 NapCat'),
+          },
+          napcatBusy === 'launch' ? '启动中…' : '启动 NapCat',
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            style: disabled(S.btn, napcatBusy !== ''),
+            disabled: napcatBusy !== '',
+            onClick: () =>
+              postNapcat('reveal', napcat && napcat.installDir ? `已打开文件夹：${napcat.installDir}` : '已打开文件夹'),
+          },
+          napcatBusy === 'reveal' ? '打开中…' : '打开文件夹',
+        ),
+        webuiUrl === '' ? h('span', { style: S.hint }, '没读到 webui.json') : null,
+      )
+
       const header = h(
         'button',
         { type: 'button', onClick: () => setOpen(!open), 'aria-expanded': open, style: S.header },
@@ -469,6 +550,7 @@ window.__ModuleLoader__.load({
         { style: S.wrap },
         header,
         h('div', { style: S.grid }, rows),
+        napcatOps,
         h(
           'div',
           { style: S.foot },
@@ -522,6 +604,8 @@ window.__ModuleLoader__.load({
      */
     /** 0.2.0 的兜底数据源：宿主自己挂的本机接口（见宿主半的 handleSettingsRequest）。 */
     const API_PATH = '/api/qq-bridge/settings'
+    /** NapCat 操作接口（宿主半不受 legacy 门控，两代宿主都挂）。 */
+    const NAPCAT_API = '/api/qq-bridge/napcat'
     /** 稳定引用：useSyncExternalStore 的 getSnapshot 每次返回新对象会死循环。 */
     const LOADING_SNAPSHOT = { status: 'loading' }
     const UNAVAILABLE_SNAPSHOT = { status: 'unavailable' }
