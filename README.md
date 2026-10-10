@@ -16,7 +16,7 @@ dsh plugin --profile web add github:sj244/dsh-qq-bridge
 > Created with DSH itself — this is a vibecoding project. / 这是个 vibecoding 项目。本项目由 DSH 写成。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 当前版本 **v0.1.2**（`main` 上还有一批未发布改动，见 CHANGELOG 的“未发布”节）
+- 当前版本 **v0.1.3**（维护性更新，见 [`CHANGELOG.md`](./CHANGELOG.md)）
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录

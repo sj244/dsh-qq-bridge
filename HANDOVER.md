@@ -57,14 +57,14 @@
 | `package.json` | 1.6 KB | 包声明：`name=dsh-qq-bridge`、`type=module`、`dsh.bundle.patch`、**`dsh.client`** |
 | `DESIGN.md` | 12.9 KB | 设计草案：与现有 QQ 插件的区别、唤醒策略、接口表、设置项、里程碑、安全注意 |
 | `README.md` | 31.6 KB | 安装/使用说明，含 OneBot 接入、access_token 配置、NapCat 一键托管、依赖解析坑与解法 |
-| `CHANGELOG.md` | 22.7 KB | 逐版本变更记录，未发布改动在最前面 |
+| `CHANGELOG.md` | 23.1 KB | 逐版本变更记录，最新版本在最前面 |
 | `test-smoke.mjs` | 152.0 KB | **离线冒烟测试**（假 ctx 直接调 `apply()`，覆盖策略分支与工具注册） |
 | `test-onebot.mjs` | 18.2 KB | **M2 端到端测试**：内置最小 OneBot WS 服务器（手写 RFC 6455，不依赖 `ws`） |
 | `test-napcat.mjs` | 15.2 KB | **M5 测试**：测试自己造 zip，覆盖解包 / CRC / zip-slip / 摘要校验 / 配置写入 |
 | `test-stickers.mjs` | 8.5 KB | **表情包测试**：登记表哈希 / 读写 / 查找 / 原子写 / 复制图片本体（见 §13.9） |
 | `screenshots.json` | 0.0 KB | 市场详情页截图声明（指向 `assets\market-cover.jpg`，见 §16） |
 | `assets\` | 197.1 KB | 仓库内静态资源：市场封面 `market-cover.jpg`（见 §16） |
-| `docs\` | 12.9 KB | 仓库内文档：市场条目 yml、DSH 0.2.0 迁移说明、v0.1.2 发行说明 |
+| `docs\` | 16.7 KB | 仓库内文档：市场条目 yml、DSH 0.2.0 迁移说明、v0.1.2 与 v0.1.3 发行说明 |
 | `LICENSE` | 1.0 KB | MIT，Copyright (c) 2026 sj244 |
 | `node_modules\@deepseek-ai` | junction | 本地安装时让 `import '@deepseek-ai/...'` 能解析（见 §7 坑 1）；**已 gitignore** |
 | `HANDOVER.local.md` | — | **未脱敏**的原始交接文档（含真实会话 id / 本机路径 / 群号），**只在本机，已 gitignore** |
