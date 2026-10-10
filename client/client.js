@@ -44,7 +44,7 @@ window.__ModuleLoader__.load({
         key: 'nicknames',
         label: '昵称',
         kind: 'list',
-        hint: '被叫到这些名字必然唤醒；逗号分隔，例如：244, 猫猫。',
+        hint: '被叫到这些名字必然唤醒；逗号分隔，例如：244, 小助手。',
       },
       {
         key: 'wakeProbability',

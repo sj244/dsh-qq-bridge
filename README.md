@@ -346,7 +346,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `targetSessionId` | `''` | 固定目标会话 id；**空 = 不驱动任何会话** |
-| `nicknames` | `['244','猫猫']` | 命中即唤醒 |
+| `nicknames` | `['244','小助手']` | 命中即唤醒 |
 | `wakeProbability` | `0.05` | 非昵称消息唤醒概率 |
 | `whitelist` / `groupWhitelist` | `[]` | 私聊 / 群白名单（**空 = 任何来源都不能唤醒**） |
 | `attachRecentChat` / `recentChatLimit` | `true` / `8` | 是否把未唤醒聊天附给下次唤醒，以及条数 |
@@ -459,7 +459,7 @@ QQ 侧没有人能点击“同意”，因此：
 
 ## 测试
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **360 条断言**：
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **417 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 设置卡片字段（假 ctx，纯离线）

@@ -50,7 +50,7 @@
         qqNumber: ''
 
         # ↓ 以下几项是 settings 命名空间 qq-bridge 的默认值（设置界面可覆盖）
-        nicknames: ['244', '猫猫']
+        nicknames: ['244', '小助手']
         # 非昵称消息的唤醒概率（5%）
         wakeProbability: 0.05
         # ⚠️ 白名单 fail-closed：留空表示任何来源都不能唤醒会话。

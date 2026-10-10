@@ -157,7 +157,7 @@ ctx.on('session/event', (session, event) => {
 | settings 键 | 默认 | 说明 |
 |---|---|---|
 | `targetSessionId` | — | 固定目标会话 id |
-| `nicknames` | `['244','猫猫']` | 命中即唤醒 |
+| `nicknames` | `['244','小助手']` | 命中即唤醒 |
 | `wakeProbability` | `0.05` | 非昵称消息唤醒概率 |
 | `whitelist` / `groupWhitelist` | `[]` | 私聊 / 群白名单（**空 = 全拒**） |
 | `attachRecentChat` / `recentChatLimit` | `true` / `20` | 未唤醒聊天是否附给下次唤醒、条数 |
@@ -494,8 +494,8 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 
 之前以为必须走 OneKey 安装器（它硬编码的 QQ 地址已 404）。实际上：
 
-- **机器上已有的 QQ 就能用**。`E:\QQ1\QQ.exe` 显示 `9.9.19.35469` 只是**启动器壳**；
-  真正的运行时在 `E:\QQ1\versions\9.9.36-53644\`（`QQNT.dll` 200+ MB）。
+- **机器上已有的 QQ 就能用**。`<QQ 安装目录>\QQ.exe` 显示 `9.9.19.35469` 只是**启动器壳**；
+  真正的运行时在 `<QQ 安装目录>\versions\9.9.36-53644\`（`QQNT.dll` 200+ MB）。
 - **NapCat v4.18.28 能注入 QQ 9.9.36**，尽管它 `qqnt.json` 声明的是 `9.9.22-40990`。
   → 「NapCat 与 QQ 必须精确版本匹配」**是错的**，别再为此绕路。
 
@@ -513,7 +513,7 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 ```
 
 - `launcher.bat` / `launcher-win10.bat` 逻辑：**必须管理员**（`net session` 检测 + `Start-Process -Verb runAs` 自我提权）
-  → 从注册表 `HKLM\SOFTWARE\WOW6432Node\...\Uninstall\QQ` 的 `UninstallString`（本机 `E:\QQ1\Uninstall.exe`）
+  → 从注册表 `HKLM\SOFTWARE\WOW6432Node\...\Uninstall\QQ` 的 `UninstallString`（本机 `<QQ 安装目录>\Uninstall.exe`）
   解析出 `QQ.exe` → `NapCatWinBootMain.exe "<QQ.exe>" "<hook.dll>" [-q QQ号]`。
   **Windows 10 用 `launcher-win10.bat`**（`launcher.bat` 依赖 `wt.exe`）。
 - **预先写的 `config/webui.json` 里的 token 不生效**，真 token 要看 NapCat 控制台窗口。
@@ -846,7 +846,7 @@ window.__ModuleLoader__.load({
 |---|---|
 | 卡片出现 | 用户截图；`Slots` inspect 里 `settings.plugin.item` 的 occupants 多了 `qq-bridge` |
 | **读** | 卡片把 `<TARGET_SESSION_ID>`、昵称列表等现有值正确显示出来 |
-| **写** | 用户在卡片里加了个昵称并保存 → `qq_bridge_status` 的 `settings.nicknames` 立刻变成 `['244','猫猫','测试昵称']` |
+| **写** | 用户在卡片里加了个昵称并保存 → `qq_bridge_status` 的 `settings.nicknames` 立刻变成 `['244','小助手','测试昵称']` |
 | **生效** | 随后群里一句**没有 @** 的「测试昵称 在吗」被唤醒，日志 `reason: "nickname"` —— 界面 → settings 用户层 → `readSettings()` → `decide()` 整条链路都通了 |
 
 ## 16. 上架插件市场（awesome-dsh-plugin）

@@ -31,7 +31,7 @@ writeFileSync(cachedImagePath, CACHED_PNG)
     description: '一只无语的猫',
     file: `qq-bridge-stickers/${CACHED_HASH}.png`,
     ext: 'png',
-    source: 'group:770156738',
+    source: 'group:12345678',
     addedAt: 1,
     sentCount: 0,
     lastSentAt: null,
@@ -47,7 +47,7 @@ writeFileSync(
         at: 1,
         userId: 'test-user',
         nickname: '群友',
-        groupId: '770156738',
+        groupId: '12345678',
         groupName: null,
         text: '看这个 [图片]',
         images: [{ path: cachedImagePath, mediaType: 'image/png', bytes: CACHED_PNG.length, hash: CACHED_HASH }],
@@ -123,7 +123,7 @@ const config = {
   // $DSH_HOME/napcat 的真实状态（那里装过 NapCat 的话，"未安装时 launch 报错"
   // 这条断言就会走到下一个分支而失败）。
   napcatInstallDir: process.env.TEMP + '/qq-bridge-smoke-napcat-absent',
-  nicknames: ['244', '猫猫'],
+  nicknames: ['244', '小助手'],
   wakeProbability: 0.05,
   whitelist: ['test-user'],
   groupWhitelist: [],
@@ -1313,16 +1313,16 @@ function sawSentText(s) {
 
 // 戳一戳：OneBot 里它是 notice 事件（不是消息段），以前会被静默丢掉（2026-10-01 用户要求适配）
 {
-  const me = '3082276036'
+  const me = '10000001'
   const pokeMe = mapOneBotNotice(
-    { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: 3097206157, target_id: 3082276036, group_id: 770156738 },
+    { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: 10000002, target_id: 10000001, group_id: 12345678 },
     me,
   )
   check('戳我 → 合成入站、atSelf 且带 poke 标记', !!pokeMe && pokeMe.atSelf === true && pokeMe.poke === true, JSON.stringify(pokeMe))
   check('戳我 → 正文是 [戳一戳] 占位符', String(pokeMe && pokeMe.text).includes('[戳一戳]'))
-  check('戳我 → 群号与操作者都留着', !!pokeMe && pokeMe.groupId === '770156738' && pokeMe.userId === '3097206157')
+  check('戳我 → 群号与操作者都留着', !!pokeMe && pokeMe.groupId === '12345678' && pokeMe.userId === '10000002')
   const pokeOther = mapOneBotNotice(
-    { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: 3097206157, target_id: 111111, group_id: 770156738 },
+    { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: 10000002, target_id: 111111, group_id: 12345678 },
     me,
   )
   check('戳别人 → 进策略但不当 atSelf（只记录）', !!pokeOther && pokeOther.atSelf !== true)
@@ -1564,7 +1564,7 @@ function sawSentText(s) {
         at: 1,
         userId: 'test-user',
         nickname: '群友',
-        groupId: '770156738',
+        groupId: '12345678',
         groupName: null,
         text: '看这个 [图片]',
         images: [{ path: srcPath, mediaType: 'image/png', bytes: png.length, hash }],
@@ -1671,7 +1671,7 @@ function sawSentText(s) {
     const onDisk = loadStickers(join(dir, 'qq-bridge-stickers.json'))
     check(
       'save：登记表已落盘（source 记了群号）',
-      onDisk.stickers[hash]?.source === 'group:770156738' && onDisk.stickers[hash]?.mood === '无语',
+      onDisk.stickers[hash]?.source === 'group:12345678' && onDisk.stickers[hash]?.mood === '无语',
       JSON.stringify(onDisk.stickers[hash]),
     )
   }
@@ -1707,12 +1707,12 @@ function sawSentText(s) {
     const noDest = JSON.parse(await stickerTool.execute({ action: 'send', hash }))
     check('send：没有目的地 → 清晰错误', noDest.ok === false && String(noDest.error).includes('目的地'), JSON.stringify(noDest))
 
-    const sent = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '770156738' }))
+    const sent = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '12345678' }))
     check('send：按 hash 发送成功', sent.ok === true && sent.hash === shortHash(hash), JSON.stringify(sent))
 
     const socket = sockets.find((s) => s.readyState === 1)
     const call = socket?.sent.find((m) => m.action === 'send_group_msg')
-    check('send：走 send_group_msg 且带上群号', !!call && String(call.params.group_id) === '770156738', JSON.stringify(call?.action))
+    check('send：走 send_group_msg 且带上群号', !!call && String(call.params.group_id) === '12345678', JSON.stringify(call?.action))
     const file = String(call?.params?.message?.[0]?.data?.file ?? '')
     check('send：图片走 base64://（不用本地路径）', file.startsWith('base64://') && !file.includes(dir), file.slice(0, 24))
     check('send：base64 解出来就是原图', Buffer.from(file.slice('base64://'.length), 'base64').equals(png))
@@ -1759,7 +1759,7 @@ function sawSentText(s) {
     // 按**内容**判断，不按条数：recentOutbox 只留最后 3 条，条数会饱和。
     const sawOutbox = async (needle) =>
       JSON.parse(await status2.execute({})).recentOutbox.some((e) => String(e.text).includes(needle))
-    const tooLong = JSON.parse(await sendTool2.execute({ text: longText, groupId: '770156738' }))
+    const tooLong = JSON.parse(await sendTool2.execute({ text: longText, groupId: '12345678' }))
     const after = sockets.reduce((n, s) => n + s.sent.length, 0)
     check(
       '超长出站被拒：reason=too-long / sent=0 / 带 limit 与 length',

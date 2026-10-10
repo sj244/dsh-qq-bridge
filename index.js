@@ -149,7 +149,7 @@ export const Config = Schema.object({
 // 没有描述就只剩一个裸键名，用户根本不知道该怎么填（M3）。
 const BridgeSettings = Schema.object({
   targetSessionId: Schema.string().default('').description('固定目标会话 id —— 决定"在跟哪个会话说话"；留空 = 不驱动任何会话。'),
-  nicknames: Schema.array(Schema.string()).default(['244']).description('叫到这些名字必然唤醒；可加多个（如 244、猫猫）。'),
+  nicknames: Schema.array(Schema.string()).default(['244']).description('叫到这些名字必然唤醒；可加多个（如 244、小助手）。'),
   wakeProbability: Schema.number().default(0.05).description('既没被 @、也没叫名字时，按这个概率唤醒（0–1）。默认 0.05 = 5%；嫌耗 token 就调小。'),
   whitelist: Schema.array(Schema.string()).default([]).description('允许唤醒的**私聊** QQ 号；空 = 谁都不能唤醒（fail-closed）。'),
   groupWhitelist: Schema.array(Schema.string()).default([]).description('允许唤醒的**群**号；空 = 任何群都不唤醒。'),

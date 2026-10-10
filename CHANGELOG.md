@@ -2,6 +2,15 @@
 
 ## 未发布
 
+- **公开仓库脱敏：真实群号、QQ 号、私人昵称与本机路径换成占位值**：只换字面值，不改逻辑、
+  不改断言结构、不删用例。
+  真实群号换成 `12345678`，涉及 `test-smoke.mjs` 与 `test-stickers.mjs`。
+  机器人自身 QQ 号换成 `10000001`，测试号换成 `10000002`，都在 `test-smoke.mjs`。
+  私人昵称换成 `小助手`，涉及 `cordis.patch.yml`、`index.js`、`client/client.js`、
+  `README.md`、`HANDOVER.md`、`test-onebot.mjs`、`test-smoke.mjs`。
+  本机绝对路径换成 `<工作区>`、`<QQ 安装目录>`、`<DSH 安装目录>`，涉及
+  `docs/dsh-0.2.0-migration.md` 与 `HANDOVER.md`。
+  `README.md` 的断言总数由 360 更正为 417；四个套件的断言总数仍为 417。
 - **未唤醒摘要的省略条数改为真实丢失量，超过 99 条写“大量消息”**：`renderDigest()` 的省略数
   原来是 `picked.length - lines.length`，只数窗口内没装下的条目。窗口外（比 `recentChatLimit`
   更早）的条目同样随快照一起删除，却没有计入，所以对模型报的丢失量偏小。

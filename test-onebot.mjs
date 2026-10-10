@@ -240,7 +240,7 @@ apply(ctx, {
   atOnlyInGroup: false,
   stripMarkdown: true,
   heartbeatTimeoutMs: 60000,
-  nicknames: ['244', '猫猫'],
+  nicknames: ['244', '小助手'],
   wakeProbability: 0, // 非昵称一律走 record，便于断言
   whitelist: ['1001'],
   groupWhitelist: ['2001'],

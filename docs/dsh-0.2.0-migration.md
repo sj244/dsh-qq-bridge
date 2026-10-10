@@ -1,6 +1,6 @@
 # DSH 0.2.0 迁移笔记（2026-10-01 真机诊断）
 
-> 场景：桌面端 APP（`E:\DSH`，Electron 44.0.0 + `resources\app.asar`）+ profile `~/.dsh/profiles/desktop`，
+> 场景：桌面端 APP（`<DSH 安装目录>`，Electron 44.0.0 + `resources\app.asar`）+ profile `~/.dsh/profiles/desktop`，
 > 客户端 UI 由第三方包 **`@linxin666/dsh-web-all@0.4.4`** 提供（这就是"web-all 0.4.x"）。
 
 ## 现象
@@ -73,7 +73,7 @@ if (legacy) {
 
 ## 环境问题（本次会话）
 
-这个会话里 `pwsh` 直接失败：`SetNamedSecurityInfoW failed (Win32 5): grantWrite(F:\游戏视频回放\DSH工作区)`。
+这个会话里 `pwsh` 直接失败：`SetNamedSecurityInfoW failed (Win32 5): grantWrite(<工作区>)`。
 即桌面端宿主的沙箱无法给该工作区授写权限 → **跑不了测试、提交不了**。
 文件读写工具（read/grep/write）正常。做迁移请回到能跑命令的会话，或先解决这个 ACL 问题。
 
@@ -130,7 +130,7 @@ if (legacy) {
 - [ ] **出站 poke 合流**：完整实现留在本地分支 `poke-tool-wip`（未推送）。
       触发条件：NapCat 的 PacketBackend 支持当前 QQ（9.9.36-53644），或换到受支持的 QQ（官方推荐 40768–44343）。
 - [ ] **桌面端沙箱 ACL**：本机桌面端在这个工作区上跑命令会失败
-      （`SetNamedSecurityInfoW failed (Win32 5): grantWrite(F:\游戏视频回放\DSH工作区)`），
+      （`SetNamedSecurityInfoW failed (Win32 5): grantWrite(<工作区>)`），
       切成 `danger-full-access` 才正常。已写进给 DSH 的反馈，等官方确认是否已知问题。
 
 
