@@ -45,6 +45,7 @@
     "index.js",
     "onebot.js",
     "napcat.js",
+    "stickers.js",
     "client",
     "assets",
     "screenshots.json",

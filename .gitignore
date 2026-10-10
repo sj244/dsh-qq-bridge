@@ -11,6 +11,18 @@ HANDOVER.local.md
 qq-bridge-state.json
 qq-bridge-state.json.tmp
 
+# Other runtime files the plugin writes next to statePath.
+# Default location is $DSH_HOME, outside this repo.
+# These rules matter when statePath points inside the repo.
+qq-bridge-settings.json
+qq-bridge-stickers.json
+qq-bridge-stickers/
+qq-bridge-images/
+.env
+
+# Local-only audit reports: they carry machine paths and internal line numbers.
+docs/audit-*.md
+
 # Logs and OS noise
 *.log
 Thumbs.db
