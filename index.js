@@ -13,7 +13,6 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -22,6 +21,18 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { createOneBotTransport } from './onebot.js'
+import {
+  findSticker,
+  hashOfBuffer,
+  importSticker,
+  listStickers,
+  loadStickers,
+  saveStickers,
+  shortHash,
+  STICKERS_DIR,
+  STICKERS_FILE,
+  upsertSticker,
+} from './stickers.js'
 import {
   configDirCandidates,
   createFetcher,
@@ -93,6 +104,10 @@ const MAX_IMAGE_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_IMAGE_CACHE_FILES = 300
 /** 摘要默认取最近几条（`recentChatLimit` 的默认值）。 */
 const DEFAULT_RECENT_CHAT_LIMIT = 8
+/** `qq_bridge_sticker` 的 `list` 最多列几条。 */
+const MAX_STICKER_LIST = 50
+/** `list` 里每条描述截断到多少字（紧凑列表，别把上下文吃掉）。 */
+const MAX_STICKER_DESC = 40
 
 export const Config = Schema.object({
   targetSessionId: Schema.string().default('').description('固定目标会话 id；留空则用 settings 里的值。'),
@@ -193,22 +208,31 @@ export function labelForSegment(type, data) {
 }
 
 /**
- * 把正文里的 `[图片]` 占位符**就地**换成 `[图片]：描述`。导出是为了可测试。
+ * 把正文里的 `[图片]` 占位符**就地**换成 `[图片#<短哈希>]：描述`。导出是为了可测试。
  *
  * 为什么不再把描述另起一段附在消息末尾：那样模型看到的是
  * 「…[图片] 文字」+ 末尾一段「[图片]：描述」，会读成"前面这张图没解析出来、
  * 后面又来了一张" —— 位置本身就是信息。（2026-10-01 用户真机反馈。）
+ *
+ * 为什么占位符里带短哈希：描述"可能不准"，而模型需要**指着一张具体的图**说话
+ * （"把刚才那张存下来"）。短哈希是那张图在插件里唯一的稳定标识，模型能把它原样交给
+ * `qq_bridge_sticker` 的 `save` / `send`。哈希取不到时退回不带 # 的 `[图片]`。
+ *
+ * `noteById` 的值形如 `{ text, hash }`（也接受裸字符串 = 只有 text）。
  * 按 images 顺序逐个对上占位符；多出来的占位符留原样，没有描述的标「（未描述）」。
  */
-export function inlineImageNotes(text, images, descById) {
+export function inlineImageNotes(text, images, noteById) {
   const list = Array.isArray(images) ? images : []
-  const notes = descById instanceof Map ? descById : new Map()
+  const notes = noteById instanceof Map ? noteById : new Map()
   let i = 0
   return String(text ?? '').replace(/\[图片\]/g, (m) => {
     if (i >= list.length) return m
-    const note = notes.get(list[i])
+    const raw = notes.get(list[i])
     i += 1
-    return note === undefined ? '[图片]（未描述）' : `[图片]：${note}`
+    if (raw === undefined || raw === null) return '[图片]（未描述）'
+    const note = typeof raw === 'string' ? { text: raw } : raw
+    const short = shortHash(note.hash ?? list[i - 1]?.hash)
+    return `${short === '' ? '[图片]' : `[图片#${short}]`}：${note.text ?? ''}`
   })
 }
 
@@ -541,6 +565,24 @@ export function apply(ctx, config) {
     state.log.push({ at: Date.now(), ...entry })
     if (state.log.length > MAX_LOG) state.log = state.log.slice(-MAX_LOG)
     saveState()
+  }
+
+  // ── 表情包登记表（与 settingsPath 同一取法：落在 statePath 所在目录）─────────
+  //
+  // 登记表 = 图片本体目录（qq-bridge-stickers/）+ 元数据文件（qq-bridge-stickers.json）。
+  // 内存里只留一份，改完立即落盘（saveStickers 是原子写）。
+  const stickersPath = join(dirname(statePath), STICKERS_FILE)
+  const stickersDir = join(dirname(statePath), STICKERS_DIR)
+  let stickerStore = null
+
+  function loadStickerStore() {
+    if (stickerStore === null) stickerStore = loadStickers(stickersPath)
+    return stickerStore
+  }
+
+  function saveStickerStore() {
+    if (stickerStore === null) return
+    if (!saveStickers(stickersPath, stickerStore)) logger.warn(`表情包登记表写入失败：${stickersPath}`)
   }
 
   // ── 唤醒策略 ───────────────────────────────────────────────────────────────
@@ -909,9 +951,19 @@ export function apply(ctx, config) {
    * 用多模态模型描述一张缓存图。
    * 这条路径很关键：目标会话的模型（如 deepseek-v4-flash）**不支持图片输入**，
    * 插件把图附上去也会被系统剥成 "image omitted"。**描述是它唯一能"知道图里是什么"的途径。**
+   *
+   * 先查表情包登记表：登记过的图直接返回登记的描述，**一次模型调用都不花**。
+   * 这也是登记表的第二个用处 —— 反复出现的图只描述一次。
    * @returns {Promise<string | null>}
    */
   async function describeImage(cached) {
+    // 命中登记表 = 这张图已经被看过并写好了描述，别再花一次多模态调用。
+    const hit = cached?.hash ? findSticker(loadStickerStore(), { hash: cached.hash }) : null
+    if (hit?.description) {
+      // 只打短哈希，不打 URL 也不打 token。
+      logger.info(`图片 #${shortHash(cached.hash)} 命中表情包登记表，跳过视觉模型`)
+      return { ok: true, text: hit.description, cached: true }
+    }
     const llm = ctx.get('llm')
     const attachments = ctx.get('attachments')
     if (!llm || !attachments) return { ok: false, reason: '没有 llm / attachments 服务' }
@@ -1016,7 +1068,10 @@ export function apply(ctx, config) {
 
   /**
    * 下载一张图并落到本地缓存。**只下载，不调用模型**（保住缓冲的零开销性质）。
-   * @returns {{path: string, mediaType: string, bytes: number} | null}
+   *
+   * 文件名就是内容哈希（`<hash>.<ext>`）：同一张图重复出现不再重复落盘，
+   * 而且**命中已有文件时照样能拿到 hash**（表情包登记与描述缓存都按 hash 认图）。
+   * @returns {{path: string, mediaType: string, bytes: number, hash: string} | null}
    */
   async function cacheImage(item) {
     try {
@@ -1028,10 +1083,13 @@ export function apply(ctx, config) {
       const mediaType = sniffImageMediaType(data)
       if (!mediaType) throw new Error(`不是可识别的图片（${data.length} 字节）`)
       const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[mediaType]
-      const path = join(imageCacheDir, `${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`)
-      writeFileSync(path, data)
-      evictImageCache()
-      return { path, mediaType, bytes: data.length }
+      const hash = hashOfBuffer(data)
+      const path = join(imageCacheDir, `${hash}.${ext}`)
+      if (!existsSync(path)) {
+        writeFileSync(path, data)
+        evictImageCache()
+      }
+      return { path, mediaType, bytes: data.length, hash }
     } catch (error) {
       logger.warn(`图片缓存失败：${String(item?.url).slice(0, 80)} -> ${error?.message ?? error}`)
       return null
@@ -1133,15 +1191,16 @@ export function apply(ctx, config) {
     // 目标模型多半看不了图（deepseek-v4-flash 就是纯文本，附件会被系统剥成 "image omitted"）
     // —— 所以先用多模态模型把图读成一句描述，然后**就地填回 [图片] 占位符**。
     // （描述另起一段附在末尾是错的：模型会读成"这张图没解析出来、后面又来了一张"。）
-    const descById = new Map()
+    // 占位符里同时带上短哈希，模型才能指着一张具体的图去 save / send 表情包。
+    const noteById = new Map()
     for (const img of allImages.slice(0, MAX_DESCRIBE_PER_WAKE)) {
       const r = await describeImage(img)
-      descById.set(img, r.ok ? r.text : `（描述失败：${r.reason}）`)
+      noteById.set(img, { text: r.ok ? r.text : `（描述失败：${r.reason}）`, hash: img.hash })
     }
 
     let text =
-      inlineImageNotes(digest.text, digest.images, descById) +
-      inlineImageNotes(renderInbound(msg, s), cachedImages, descById)
+      inlineImageNotes(digest.text, digest.images, noteById) +
+      inlineImageNotes(renderInbound(msg, s), cachedImages, noteById)
     if (failures.length > 0) text += `\n（有 ${failures.length} 张图片没能取到，原因：${failures[0]}）`
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
@@ -1857,6 +1916,27 @@ export function apply(ctx, config) {
   //   ① **来源闸门**：只有「被 QQ 唤醒的那一轮」才发得出去。在 DSH 界面里直接对话时调用会被
   //      拒绝，并把原因回给模型 —— 这正是标记块模式缺的那个反馈回路（用户报的"分不清在哪"）；
   //   ② 每次调用（含被拒绝的**不**记）都落 outbox（via: 'tool'），事后能从 status 查到。
+  // `qq_bridge_send` 与 `qq_bridge_sticker` 共用这一道闸门：
+  //   ① 被 QQ 唤醒的那一轮 → 放行（返回 null）；
+  //   ② 不是 QQ 唤醒的那一轮 → 第一次调用只回一句"确认要发吗"（**一个字都不发**），
+  //      同一轮里再调一次才真的发。`nonQQConfirmPending` 按轮清零，不跨轮泄漏。
+  // 返回**字符串**时调用方必须原样 return 它；返回 null = 放行。
+  function outboundGate(action) {
+    if (currentTurnFromQQ) return null
+    if (!nonQQConfirmPending) {
+      nonQQConfirmPending = true
+      return JSON.stringify({
+        sent: 0,
+        needsConfirm: true,
+        reason:
+          '本轮不是 QQ 唤醒的（这条消息来自 DSH 界面），所以**这次没有发**。' +
+          '确实要发到 QQ 的话：**再调用一次本工具**就会发出去；不想发就别再调，正常回复即可。',
+      }, null, 2)
+    }
+    logger.info(`非 QQ 轮：二次确认通过，按确认执行（${action}）`)
+    return null
+  }
+
   ctx.tools.register(defineTool({
     name: 'qq_bridge_send',
     description:
@@ -1876,19 +1956,8 @@ export function apply(ctx, config) {
       // 不是 QQ 唤醒的那一轮，第一次调用只回一句"确认要发吗"、**一个字都不发**；
       // 同一轮里再调一次才真的发出去。DSH 侧依然不会误发（多跨一道有意识的动作），
       // 但同时保住了"我确实想让你发到 QQ"这条能力 —— 以前是彻底发不出去。
-      if (!currentTurnFromQQ) {
-        if (!nonQQConfirmPending) {
-          nonQQConfirmPending = true
-          return JSON.stringify({
-            sent: 0,
-            needsConfirm: true,
-            reason:
-              '本轮不是 QQ 唤醒的（这条消息来自 DSH 界面），所以**这次没有发**。' +
-              '确实要发到 QQ 的话：**再调用一次本工具**就会发出去；不想发就别再调，正常回复即可。',
-          }, null, 2)
-        }
-        logger.info('非 QQ 轮：二次确认通过，按确认发送')
-      }
+      const blocked = outboundGate('qq_bridge_send')
+      if (blocked !== null) return blocked
       const dest = args.groupId
         ? { kind: 'group', groupId: String(args.groupId) }
         : args.userId
@@ -1907,6 +1976,232 @@ export function apply(ctx, config) {
         return JSON.stringify(result, null, 2)
       } catch (error) {
         return JSON.stringify({ error: error?.message ?? String(error) }, null, 2)
+      }
+    },
+  }))
+
+  // ── 表情包：登记 / 列表 / 发送 ──────────────────────────────────────────────
+  //
+  // 不受 debugTools 限制 —— 这是产品的玩法（收藏群友发的图、按情绪发表情包），不是调试工具。
+  // 发送走与 `qq_bridge_send` **同一道**来源闸门；图片本体一律用 **base64** 送，
+  // 不送本地路径（NapCat 的 `enableLocalFile2Url` 是 false，给路径它读不到）。
+
+  /** 登记项的图片本体大小（读不到就是 null，不抛）。 */
+  function stickerBytes(entry) {
+    try {
+      return statSync(join(dirname(statePath), String(entry?.file ?? ''))).size
+    } catch {
+      return null
+    }
+  }
+
+  /** 缓冲区里最近一张图。返回 { image, item }；没有就是 null。 */
+  function lastBufferedImage() {
+    for (let i = state.buffer.length - 1; i >= 0; i--) {
+      const item = state.buffer[i]
+      const list = Array.isArray(item?.images) ? item.images : []
+      const image = list[list.length - 1]
+      if (image?.path) return { image, item }
+    }
+    return null
+  }
+
+  /**
+   * 按 hash（短哈希或全哈希）找源图：先在**缓冲区**找（那里带着来源信息），
+   * 再到**图片缓存目录**找。缓存里的新文件名就是 hash；老文件名没有 hash，
+   * 只好把内容算一遍再比（save 是显式动作，这点 I/O 可以接受）。
+   */
+  function findSourceByHash(hash) {
+    const want = String(hash ?? '')
+      .trim()
+      .toLowerCase()
+    if (want === '') return null
+    for (let i = state.buffer.length - 1; i >= 0; i--) {
+      const item = state.buffer[i]
+      for (const image of Array.isArray(item?.images) ? item.images : []) {
+        if (String(image?.hash ?? '').toLowerCase().startsWith(want)) return { image, item }
+      }
+    }
+    for (const file of listImageCache()) {
+      if (!file.name.toLowerCase().startsWith(want)) {
+        try {
+          if (!hashOfBuffer(readFileSync(file.path)).startsWith(want)) continue
+        } catch {
+          continue
+        }
+      }
+      return { image: { path: file.path }, item: null }
+    }
+    return null
+  }
+
+  /** 源图的来源标注：群 / 私聊 / 只从缓存捞到的。 */
+  function sourceLabelOf(item) {
+    if (!item) return 'cache'
+    if (item.groupId) return `group:${item.groupId}`
+    if (item.userId) return `private:${item.userId}`
+    return 'unknown'
+  }
+
+  ctx.tools.register(defineTool({
+    name: 'qq_bridge_sticker',
+    description:
+      '表情包：收藏群友发的图、按情绪或哈希发出去。' +
+      'action:"list" 看已登记的有哪些（可按 mood 过滤）；' +
+      'action:"save" 把某张图存成表情包（给 hash，或 fromLast:true 取缓冲区里最近一张；mood 与 description 必填）；' +
+      'action:"send" 发一张（给 hash 精确发，或只给 mood 在该情绪里随机挑一张）。' +
+      '图片本体以 base64 发送，不依赖本地路径。' +
+      '发送与 qq_bridge_send 共用同一道来源闸门：不是 QQ 唤醒的那一轮，第一次调用只会回一句确认。',
+    parameters: {
+      action: { type: 'string', required: true, description: 'list / save / send。' },
+      hash: { type: 'string', description: '短哈希或完整哈希；入站正文里的 [图片#xxxxxx] 就是它。' },
+      fromLast: { type: 'boolean', description: 'save 时 true = 取缓冲区里最近一张图。' },
+      mood: { type: 'string', description: '情绪分类，如 无语 / 开心 / 震惊。save 必填；send 只给 mood 时随机挑一张。' },
+      description: { type: 'string', description: '这张图是什么。save 必填，之后识图与发送都用它。' },
+      groupId: { type: 'string', description: '发到哪个群；与 userId 二选一，都不给则用最后一次入站目的地。' },
+      userId: { type: 'string', description: '发到哪个私聊 QQ 号。' },
+    },
+    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
+    async execute(args) {
+      const store = loadStickerStore()
+      const action = String(args.action ?? 'list')
+      try {
+        if (action === 'list') {
+          const items = listStickers(store, { mood: args.mood, limit: MAX_STICKER_LIST })
+          if (items.length === 0) {
+            return JSON.stringify({
+              count: 0,
+              mood: args.mood ?? null,
+              note:
+                String(args.mood ?? '').trim() === ''
+                  ? '还没有登记任何表情包：让群友发一张图，再用 action:"save" 存下来。'
+                  : `情绪“${args.mood}”下还没有表情包。`,
+            }, null, 2)
+          }
+          return JSON.stringify({
+            count: items.length,
+            stickers: items.map((e) => ({
+              hash: shortHash(e.hash),
+              mood: e.mood ?? '',
+              description: truncateText(e.description ?? '', MAX_STICKER_DESC),
+              bytes: stickerBytes(e),
+              sentCount: Number(e.sentCount ?? 0),
+            })),
+          }, null, 2)
+        }
+
+        if (action === 'save') {
+          const mood = String(args.mood ?? '').trim()
+          const description = String(args.description ?? '').trim()
+          if (mood === '' || description === '') {
+            return JSON.stringify({ ok: false, error: 'save 需要 mood 与 description（这张图属于什么情绪、画的是什么）。' }, null, 2)
+          }
+          let src = null
+          if (args.fromLast === true) src = lastBufferedImage()
+          else if (String(args.hash ?? '').trim() !== '') src = findSourceByHash(args.hash)
+          else {
+            return JSON.stringify({ ok: false, error: 'save 需要 hash（正文里 [图片#xxxxxx] 那个短哈希）或 fromLast: true。' }, null, 2)
+          }
+          if (!src) {
+            return JSON.stringify({
+              ok: false,
+              error:
+                '没有找到这张图的本地文件。先让群友发一张图（收到就会落盘），' +
+                '或用 action:"list" 看已登记的哈希；fromLast: true 取的是缓冲区里最近一张图。',
+            }, null, 2)
+          }
+          const entry = importSticker({
+            store,
+            srcPath: src.image.path,
+            destDir: stickersDir,
+            mood,
+            description,
+            source: sourceLabelOf(src.item),
+          })
+          saveStickerStore()
+          logger.info(`表情包已登记 #${shortHash(entry.hash)}（${entry.mood}）`)
+          return JSON.stringify({
+            ok: true,
+            hash: shortHash(entry.hash),
+            mood: entry.mood,
+            description: entry.description,
+            file: entry.file,
+            bytes: stickerBytes(entry),
+          }, null, 2)
+        }
+
+        if (action === 'send') {
+          // 与 qq_bridge_send 同一道闸门：非 QQ 轮第一次调用只回确认、一个字都不发。
+          const blocked = outboundGate('qq_bridge_sticker')
+          if (blocked !== null) return blocked
+
+          let entry = null
+          if (String(args.hash ?? '').trim() !== '') {
+            entry = findSticker(store, { hash: args.hash })
+          } else if (String(args.mood ?? '').trim() !== '') {
+            const pool = listStickers(store, { mood: args.mood })
+            entry = pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : null
+          } else {
+            return JSON.stringify({ ok: false, error: 'send 需要 hash 或 mood 至少一个。' }, null, 2)
+          }
+          if (!entry) {
+            return JSON.stringify({
+              ok: false,
+              error: `登记表里没有匹配的表情包（hash=${args.hash ?? '-'} mood=${args.mood ?? '-'}）。先 action:"list" 看有哪些。`,
+            }, null, 2)
+          }
+
+          const dest = args.groupId
+            ? { kind: 'group', groupId: String(args.groupId) }
+            : args.userId
+              ? { kind: 'private', userId: String(args.userId) }
+              : state.lastDestination
+          if (!dest?.kind) {
+            return JSON.stringify({
+              ok: false,
+              error: '还没有目的地：给 groupId 或 userId，或先等一条非丢弃的 QQ 入站消息。',
+            }, null, 2)
+          }
+          if (!transport.isOpen()) {
+            return JSON.stringify({ ok: false, error: 'OneBot 传输未连接，表情包没有发出去。' }, null, 2)
+          }
+          const filePath = join(dirname(statePath), String(entry.file ?? ''))
+          if (!entry.file || !existsSync(filePath)) {
+            return JSON.stringify({ ok: false, error: `登记表里的图片文件不存在：${entry.file ?? '(空)'}` }, null, 2)
+          }
+          const b64 = readFileSync(filePath).toString('base64')
+          // base64:// 是 NapCat 唯一可靠的送图方式：enableLocalFile2Url 关着时本地路径读不到。
+          const message = [{ type: 'image', data: { file: `base64://${b64}` } }]
+          if (dest.kind === 'group') await transport.call('send_group_msg', { group_id: dest.groupId, message })
+          else await transport.call('send_private_msg', { user_id: dest.userId, message })
+
+          upsertSticker(store, {
+            hash: entry.hash,
+            sentCount: Number(entry.sentCount ?? 0) + 1,
+            lastSentAt: Date.now(),
+          })
+          saveStickerStore()
+          recordOutbox({
+            sessionId: 'tool:qq_bridge_sticker',
+            via: 'tool',
+            action: 'sticker',
+            nonQQTurn: !currentTurnFromQQ,
+            to: dest,
+            text: `[表情包#${shortHash(entry.hash)}]`,
+          })
+          logger.info(`已发送表情包 #${shortHash(entry.hash)} 到 ${dest.kind}:${dest.groupId ?? dest.userId}`)
+          return JSON.stringify({
+            ok: true,
+            sent: 1,
+            hash: shortHash(entry.hash),
+            mood: entry.mood ?? '',
+            to: dest,
+          }, null, 2)
+        }
+
+        return JSON.stringify({ ok: false, error: `未知 action: ${action}`, valid: ['list', 'save', 'send'] }, null, 2)
+      } catch (error) {
+        return JSON.stringify({ ok: false, error: error?.message ?? String(error) }, null, 2)
       }
     },
   }))
@@ -2374,7 +2669,8 @@ export function buildUsagePrompt(s = {}) {
     '【你会看到什么】',
     '- 入站消息形如「[QQ · 群名] 昵称：内容」；私聊时地点写成「私聊」。',
     '- 你没被唤醒期间的聊天会攒成一段「[QQ 未唤醒期间聊天记录] … [记录结束]」摘要，附在消息前面。',
-    '- 图片由多模态模型先转成文字，**就地**贴在图片原来的位置上，形如「[图片]：<描述>」—— 描述可能不准，别当成绝对事实。',
+    '- 图片由多模态模型先转成文字，**就地**贴在图片原来的位置上，形如「[图片#a1b2c3]：<描述>」—— 描述可能不准，别当成绝对事实。',
+    '  方括号里的 6 位短哈希就是这张图在插件里的编号：模型可以用它把某张图存成表情包或再发出去。',
     '- 被「戳一戳」会显示成「[戳一戳]（戳的是我）」—— 那和被人 @ 一样，是有人在叫你。',
     '',
     '【怎么把话说回 QQ】',
@@ -2400,6 +2696,11 @@ export function buildUsagePrompt(s = {}) {
             '  别拿它当回复通道 —— 它发出去的东西同样会进群，而且会被记进 outbox 台账。',
           ]),
     '- 发到群里的字 = 群里每个人都会看到的话。QQ 是聊天，不是工作台。',
+    '',
+    '【表情包】',
+    '- 想发表情包就调 `qq_bridge_sticker`：用 `list` 看已登记的有哪些，用 `send` 按情绪（mood）或哈希发一张。',
+    '- 想收藏群友发的图，把正文里那张图的短哈希交给 `save`，再给它 mood 与 description。',
+    '  存过之后这张图直接命中登记表，识图不再花多模态调用。',
     '',
     '【群聊礼仪】',
     '- 只写一两句正常人会在群里说的话，**默认 40 字以内**（一到两行）；别刷屏，别写小作文。',

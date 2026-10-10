@@ -34,7 +34,7 @@
   **不会发出去**，同一轮里**再调一次**才真的发（确认状态按轮清零，不会跨轮泄漏；非 QQ 轮的发送在
   outbox 里标 `nonQQTurn: true`）。
 - **图片描述改为就地标注**：以前描述另起一段附在消息末尾，模型会读成"这张图没解析出来、后面又来了一张"；
-  现在直接把描述填回图片原来的位置，形如 `[图片]：<描述>`。
+  现在直接把描述填回图片原来的位置，形如 `[图片]：<描述>`（2026-10-02 起改成 `[图片#<短哈希>]：<描述>`，见本节末条）。
 - **戳一戳更新**：戳一戳走的是 **notice 事件**（不是消息段），以前会被静默丢掉；现在"戳我"和 @ 我同级
   **必唤醒**，戳别人只记录不唤醒，其它 notice 会留一条日志方便后续适配。
 - **兼容 DSH 0.2.0 的设置页**：0.2.0 换了**两处**名字 —— 客户端设置服务从 `settingsScope` 变成
@@ -54,6 +54,23 @@
   `GET/POST /api/qq-bridge/settings`；值存 `$DSH_HOME/qq-bridge-settings.json`
   （优先级：设置文件 > composition config）；浏览器半在拿不到可写域时自动改走这个接口。
   非 loopback 请求一律 403，只写 schema 白名单里的键。0.1.5 与 0.2.0 上都能改设置了。
+- **表情包（新功能）**：群友发的图可以登记成表情包，之后按情绪或哈希再发出去。新模块 `stickers.js`
+  （纯函数 + 文件读写，导出以便测试）：`hashOfBuffer()` 取图片字节 sha256 的前 16 位十六进制，
+  `loadStickers()` / `saveStickers()`（原子写，读不到或坏了返回空表）、`upsertSticker()` /
+  `findSticker()` / `listStickers()`、`importSticker()`（算 hash、按需复制图片本体、登记）。
+  登记表存 `<statePath 目录>/qq-bridge-stickers.json`，图片本体存同目录的 `qq-bridge-stickers/<hash>.<ext>`。
+  新工具 `qq_bridge_sticker`（**不受 `debugTools` 限制**）有 3 个 action：`list` 列已登记的
+  （短哈希 / mood / 截断描述 / 大小）、`save` 登记一张图（给 `hash`，或 `fromLast: true` 取缓冲区里最近一张；
+  `mood` 与 `description` 必填）、`send` 发一张（给 `hash` 精确发，或只给 `mood` 在该情绪里随机挑一张）。
+  发送与 `qq_bridge_send` 共用同一道来源闸门（抽出为 `outboundGate()`）；图片本体用 `base64://` 发送，
+  不用本地路径（NapCat 的 `enableLocalFile2Url` 是 false）；成功记 outbox（`via: 'tool'`、`action: 'sticker'`）
+  并更新该条的 `sentCount` / `lastSentAt`。
+- **图片占位符带短哈希 + 描述缓存命中**：入站占位符从 `[图片]：<描述>` 改成 `[图片#<短哈希>]：<描述>`
+  （描述失败写成 `[图片#<短哈希>]：（描述失败：原因）`），模型据此能指着一张具体的图交给 `qq_bridge_sticker`；
+  注入的系统提示同步改了格式说明。图片缓存的文件名改成内容哈希（`<hash>.<ext>`）：同一张图不重复落盘，
+  命中已有文件时也拿得到哈希。`describeImage()` 先查登记表，命中且有 `description` 时**直接返回登记的描述、
+  不调用多模态模型**（反复出现的图只描述一次），日志只记短哈希。新增测试套件 `test-stickers.mjs`（40 条）；
+  `test-smoke.mjs` 增加描述缓存命中、入站短哈希渲染与表情包工具的断言。
 
 
 

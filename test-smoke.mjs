@@ -4,15 +4,58 @@
 // 运行：node test-smoke.mjs
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
+import { hashOfBuffer, loadStickers, saveStickers, shortHash, upsertSticker } from './stickers.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
 const statePath = process.env.TEMP + '/qq-bridge-smoke.json'
 if (existsSync(statePath)) rmSync(statePath, { force: true })
+
+// ── 表情包 / 描述缓存用的夹具（必须在 apply 之前写好）─────────────────────────
+// 登记表的路径与宿主半一致：statePath 所在目录。
+const stickersJson = join(dirname(statePath), 'qq-bridge-stickers.json')
+// 一张真 PNG（只要前 4 个字节对，sniffImageMediaType 就认）。
+const CACHED_PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex')
+const CACHED_HASH = hashOfBuffer(CACHED_PNG)
+const cachedImagePath = join(tmpdir(), `qq-bridge-smoke-image-${CACHED_HASH}.png`)
+writeFileSync(cachedImagePath, CACHED_PNG)
+{
+  const store = loadStickers(stickersJson)
+  upsertSticker(store, {
+    hash: CACHED_HASH,
+    mood: '无语',
+    description: '一只无语的猫',
+    file: `qq-bridge-stickers/${CACHED_HASH}.png`,
+    ext: 'png',
+    source: 'group:770156738',
+    addedAt: 1,
+    sentCount: 0,
+    lastSentAt: null,
+  })
+  saveStickers(stickersJson, store)
+}
+// 预热状态文件：缓冲里放一条带图的消息。唤醒时它走真实路径（digest.images → describeImage）。
+writeFileSync(
+  statePath,
+  `${JSON.stringify({
+    buffer: [
+      {
+        at: 1,
+        userId: 'test-user',
+        nickname: '群友',
+        groupId: '770156738',
+        groupName: null,
+        text: '看这个 [图片]',
+        images: [{ path: cachedImagePath, mediaType: 'image/png', bytes: CACHED_PNG.length, hash: CACHED_HASH }],
+      },
+    ],
+  }, null, 2)}\n`,
+  'utf8',
+)
 
 const registered = []
 const warnings = []
@@ -27,6 +70,10 @@ let fakeAgent = null
 // 恢复会话那条用例会塞这两个：假 sessionQuery + 捕获 resume 收到的参数
 let fakeSessionQuery = null
 let lastResumeOptions = null
+// 「描述缓存命中」用例会塞这两个：假 attachments + 假 llm（统计多模态调用次数）
+let fakeAttachments = null
+let fakeLlm = null
+let visionStreamCalls = 0
 /** 宿主半挂出来的 HTTP 路由（webServer 假实现收集用）。 */
 const capturedRoutes = []
 
@@ -50,7 +97,12 @@ const ctx = {
     return () => {}
   },
   effect: () => {},
-  get: (name) => (name === 'sessionQuery' ? fakeSessionQuery : undefined),
+  get: (name) => {
+    if (name === 'sessionQuery') return fakeSessionQuery
+    if (name === 'attachments') return fakeAttachments
+    if (name === 'llm') return fakeLlm
+    return undefined
+  },
 }
 // 真实 Cordis ctx 一定有 ctx.inject（可选注入用它）；假 ctx 也补上，
 // 这样「设置接口」那条路能被离线测到。
@@ -97,7 +149,7 @@ check(
   JSON.stringify(capturedRoutes.map((r) => r.path)),
 )
 console.log('registered tools:', registered.map((t) => t.name).join(', '))
-check('apply 未抛错且注册了 6 个工具', registered.length === 6)
+check('apply 未抛错且注册了 7 个工具', registered.length === 7)
 
 const sim = registered.find((t) => t.name === 'qq_bridge_simulate')
 const status = registered.find((t) => t.name === 'qq_bridge_status')
@@ -106,6 +158,49 @@ check('qq_bridge_status 存在', !!status)
 check('qq_bridge_send 存在（M2）', !!registered.find((t) => t.name === 'qq_bridge_send'))
 check('qq_bridge_transport 存在（M2）', !!registered.find((t) => t.name === 'qq_bridge_transport'))
 check('qq_bridge_napcat 存在（M5）', !!registered.find((t) => t.name === 'qq_bridge_napcat'))
+check('qq_bridge_sticker 存在（表情包）', !!registered.find((t) => t.name === 'qq_bridge_sticker'))
+
+// ★ 描述缓存命中：登记过的图**不调用多模态**，登记里的 description 直接进正文。
+//   （用户要求：缓存命中就不调多模态 —— 反复出现的图只描述一次。）
+{
+  check('stickers：登记表落在 statePath 同目录', existsSync(stickersJson), stickersJson)
+  fakeAttachments = {
+    imageLimits: { maxImagesPerMessage: 4 },
+    saveImage: async ({ mediaType }) => ({ id: 'smoke-att', mediaType }),
+  }
+  fakeLlm = {
+    listProviders: () => [{ id: 'smoke' }],
+    listModels: async () => [{ id: 'smoke-vision', provider: 'smoke', inputModalities: ['image'] }],
+    stream: () => {
+      visionStreamCalls += 1
+      throw new Error('llm 不该被调用：这张图已经登记过了')
+    },
+  }
+  let injected = null
+  fakeAgent = {
+    id: 'session-smoke',
+    ctx: { get: () => undefined, effect: () => () => {} },
+    status: 'idle',
+    followup: (m) => {
+      injected = m
+    },
+  }
+  const r = JSON.parse(await sim.execute({ text: '244 看这个图', userId: 'test-user', nickname: '群友' }))
+  check('已登记的图：唤醒走通真实路径', r?.decision?.delivered === true, JSON.stringify(r?.decision ?? r))
+  const text = String(injected?.content?.[0]?.text ?? '')
+  check(
+    '已登记的图：描述来自登记表（带短哈希）',
+    text.includes(`[图片#${CACHED_HASH.slice(0, 6)}]：一只无语的猫`),
+    text.slice(-90).replace(/\n/g, ' '),
+  )
+  check('已登记的图：一次多模态都没调', visionStreamCalls === 0, `llm.stream 被调 ${visionStreamCalls} 次`)
+  fakeAgent = null
+  fakeAttachments = null
+  fakeLlm = null
+  // 上面那次唤醒认领了"下一轮"，会把后面闸门用例的前提顶掉 —— 走一遍 turn/start+turn/end 还原。
+  handlers['session/event']({ id: 'session-smoke' }, { type: 'turn/start', data: { turn: 1 } })
+  handlers['session/event']({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+}
 
 // status 能跑通
 if (status) {
@@ -405,6 +500,17 @@ if (sim) {
   check('用法说明：截断阈值跟着 replyMaxChars 走', p.includes('1200 字'), p.slice(0, 80))
   check('用法说明：明确「回群只用标记块，别拿 send 工具当回复通道」', p.includes('qq_bridge_send') && p.includes('别拿它当回复通道'))
   check('用法说明：说明被戳会显示成「[戳一戳]（戳的是我）」', p.includes('[戳一戳]') && p.includes('戳的是我'))
+  // 表情包是产品玩法：提示词必须教模型怎么用（否则工具存在但永远没人调）
+  check(
+    '用法说明：图片占位符带短哈希（模型能指着一张具体的图）',
+    p.includes('[图片#') && p.includes('短哈希'),
+    p.slice(0, 0),
+  )
+  check(
+    '用法说明：教用 qq_bridge_sticker（list / send / save）',
+    p.includes('qq_bridge_sticker') && p.includes('`list`') && p.includes('`send`') && p.includes('`save`'),
+  )
+  check('用法说明：登记过的图不再花多模态调用', p.includes('命中登记表') && p.includes('多模态调用'))
 }
 
 // 出站方式是**开关**（replyMode）：marker / tool / always —— 提示词与出站路径都要跟着变
@@ -916,23 +1022,36 @@ if (sim) {
   check('每个截图文件都真实存在（改名/删除就 FAIL）', gone.length === 0, gone.join(', '))
 }
 
-// 图片描述必须**就地**填回 [图片] 占位符（2026-10-01 用户真机反馈：以前描述另起一段
-// 附在末尾，模型会读成"这张图没解析出来、后面又来了一张"）
+// 图片描述必须**就地**填回 [图片] 占位符，并带上短哈希（2026-10-01 用户真机反馈：以前描述另起一段
+// 附在末尾，模型会读成"这张图没解析出来、后面又来了一张"；短哈希让模型能指着一张具体的图存 / 发）
 {
-  const i1 = { url: 'a' }
-  const i2 = { url: 'b' }
+  const i1 = { url: 'a', hash: 'aaaaaa1111111111' }
+  const i2 = { url: 'b', hash: 'bbbbbb2222222222' }
+  const note = (text, hash) => ({ text, hash })
   const d = new Map([
-    [i1, '一只猫'],
-    [i2, '一张卡牌：攻击力 3'],
+    [i1, note('一只猫', 'aaaaaa1111111111')],
+    [i2, note('一张卡牌：攻击力 3', 'bbbbbb2222222222')],
   ])
-  check('描述就地替换占位符', inlineImageNotes('看看 [图片] 这个', [i1], d) === '看看 [图片]：一只猫 这个')
-  check('多图按顺序对上各自的描述', inlineImageNotes('[图片] 和 [图片]', [i1, i2], d) === '[图片]：一只猫 和 [图片]：一张卡牌：攻击力 3')
+  check('描述就地替换占位符（带短哈希）', inlineImageNotes('看看 [图片] 这个', [i1], d) === '看看 [图片#aaaaaa]：一只猫 这个')
+  check('多图按顺序对上各自的描述', inlineImageNotes('[图片] 和 [图片]', [i1, i2], d) === '[图片#aaaaaa]：一只猫 和 [图片#bbbbbb]：一张卡牌：攻击力 3')
   check('没拿到描述 → 标未描述', inlineImageNotes('[图片]', [i1], new Map()) === '[图片]（未描述）')
-  check('纯图无文字', inlineImageNotes('[图片]', [i1], d) === '[图片]：一只猫')
-  check('多出来的占位符留原样（对不上就不编）', inlineImageNotes('[图片][图片]', [i1], d) === '[图片]：一只猫[图片]')
+  check('纯图无文字', inlineImageNotes('[图片]', [i1], d) === '[图片#aaaaaa]：一只猫')
+  check(
+    '描述失败也带短哈希（模型仍能指这张图）',
+    inlineImageNotes('[图片]', [i1], new Map([[i1, note('（描述失败：超时）', 'aaaaaa1111111111')]])) === '[图片#aaaaaa]：（描述失败：超时）',
+  )
+  check('图和 note 都没有 hash 时退回裸占位符（老缓存条目）', (() => {
+    const i3 = { url: 'c' }
+    return inlineImageNotes('[图片]', [i3], new Map([[i3, note('x')]])) === '[图片]：x'
+  })())
+  check(
+    'note 里没带 hash 时用图片自己的 hash',
+    inlineImageNotes('[图片]', [i1], new Map([[i1, note('一只猫')]])) === '[图片#aaaaaa]：一只猫',
+  )
+  check('多出来的占位符留原样（对不上就不编）', inlineImageNotes('[图片][图片]', [i1], d) === '[图片#aaaaaa]：一只猫[图片]')
   check('没有占位符就不动正文', inlineImageNotes('只有文字', [i1], d) === '只有文字')
   check('关键：不会再多出一段 [图片] 开头的描述行', !/\n\s*\[图片/.test(inlineImageNotes('[图片] 文字', [i1], d)))
-  check('digest 与入站各自对齐（不会串号）', inlineImageNotes('缓冲 [图片]', [i1], d) + inlineImageNotes('本条 [图片]', [i2], d) === '缓冲 [图片]：一只猫本条 [图片]：一张卡牌：攻击力 3')
+  check('digest 与入站各自对齐（不会串号）', inlineImageNotes('缓冲 [图片]', [i1], d) + inlineImageNotes('本条 [图片]', [i2], d) === '缓冲 [图片#aaaaaa]：一只猫本条 [图片#bbbbbb]：一张卡牌：攻击力 3')
 }
 
 // 戳一戳：OneBot 里它是 notice 事件（不是消息段），以前会被静默丢掉（2026-10-01 用户要求适配）
@@ -1169,6 +1288,238 @@ if (sim) {
 
   rmSync(installDir, { recursive: true, force: true })
 }
+
+// ★ 表情包工具：登记（save）/ 列表（list）/ 发送（send，base64 出站）。
+//   独立 ctx（自己的 handler map、自己的 statePath、假 WebSocket）—— 与前面的用例完全隔离，
+//   也正因为隔离，这里可以真跑一遍"发送成功"的路径。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-sticker-tool-'))
+  const statePathS = join(dir, 'state.json')
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex')
+  const hash = hashOfBuffer(png)
+  const srcPath = join(dir, 'src.png')
+  writeFileSync(srcPath, png)
+  // 预热状态：缓冲里放一条群友发的图（record 分支的产物：本地路径 + hash）。
+  writeFileSync(
+    statePathS,
+    `${JSON.stringify({
+      buffer: [{
+        at: 1,
+        userId: 'test-user',
+        nickname: '群友',
+        groupId: '770156738',
+        groupName: null,
+        text: '看这个 [图片]',
+        images: [{ path: srcPath, mediaType: 'image/png', bytes: png.length, hash }],
+      }],
+    })}\n`,
+    'utf8',
+  )
+
+  const savedHome = process.env.DSH_HOME
+  const savedWebSocket = globalThis.WebSocket
+  const sockets = []
+  // 假 WebSocket：装上就当连上；send() 立刻用 echo 回一个成功包。
+  globalThis.WebSocket = class {
+    constructor(url) {
+      this.url = url
+      this.readyState = 0
+      this.sent = []
+      this.onopen = this.onmessage = this.onclose = this.onerror = null
+      sockets.push(this)
+      setTimeout(() => {
+        this.readyState = 1
+        this.onopen?.({})
+      }, 0)
+    }
+    send(text) {
+      const msg = JSON.parse(String(text))
+      this.sent.push(msg)
+      const data = msg.action === 'get_login_info' ? { user_id: 10001, nickname: 'fake-bot' } : { message_id: 7001 }
+      setTimeout(() => {
+        this.onmessage?.({ data: JSON.stringify({ status: 'ok', retcode: 0, data, echo: msg.echo }) })
+      }, 0)
+    }
+    close() {
+      this.readyState = 3
+      this.onclose?.({ code: 1000 })
+    }
+  }
+  // 图片缓存目录也跟着落到临时目录：否则 listImageCache / findSourceByHash 会去扫用户真实的 qq-bridge-images。
+  process.env.DSH_HOME = join(dir, 'home')
+
+  const stickerHandlers = {}
+  const registered2 = []
+  const resolved2 = {}
+  const disposers = []
+  const ctxS = {
+    logger: { info() {}, warn: (m) => warnings.push(String(m)) },
+    settings: {
+      register: (_ns, _schema, opts) => {
+        Object.assign(resolved2, opts?.base ?? {})
+        return {}
+      },
+      get: () => resolved2,
+    },
+    agents: { get: () => undefined, roots: () => [], resume: async () => { throw new Error('no factory') } },
+    tools: { register: (def) => registered2.push(def) },
+    on: (name, fn) => {
+      stickerHandlers[name] = fn
+      return () => {}
+    },
+    effect: (fn) => {
+      const d = fn()
+      if (typeof d === 'function') disposers.push(d)
+    },
+    get: () => undefined,
+  }
+  apply(ctxS, {
+    targetSessionId: 'session-sticker',
+    statePath: statePathS,
+    debugTools: true,
+    onebotUrl: 'ws://127.0.0.1:9/', // 假 WebSocket 会立刻把它当连上
+    wakeProbability: 0, // 只记录：save 要从缓冲里取图
+    nicknames: ['244'],
+    whitelist: ['test-user'],
+    groupWhitelist: [],
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+  await new Promise((r) => setTimeout(r, 20))
+
+  const stickerTool = registered2.find((t) => t.name === 'qq_bridge_sticker')
+  const status2 = registered2.find((t) => t.name === 'qq_bridge_status')
+  check('表情包工具在独立 ctx 里也注册', !!stickerTool && !!status2, registered2.map((t) => t.name).join(','))
+
+  // 空表：list 给一句提示（不是空白，也不是报错）
+  {
+    const out = JSON.parse(await stickerTool.execute({ action: 'list' }))
+    check('list：没有登记时给一句提示', out.count === 0 && String(out.note).includes('save'), JSON.stringify(out))
+  }
+
+  // 闸门：与 qq_bridge_send 同一道 —— 非 QQ 轮第一次调用只回确认
+  {
+    stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'user/message', data: { source: { kind: 'user' } } })
+    stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/start', data: { turn: 1 } })
+    const asked = JSON.parse(await stickerTool.execute({ action: 'send', hash, userId: '1001' }))
+    check('send：非 QQ 轮第一次调用只回确认（一个字都不发）', asked.needsConfirm === true && asked.sent === 0, JSON.stringify(asked))
+    stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  }
+
+  // save：从缓冲区最近一张图登记（顺带复制图片本体）
+  {
+    const out = JSON.parse(await stickerTool.execute({ action: 'save', fromLast: true, mood: '无语', description: '一只无语的猫' }))
+    check('save：fromLast 登记成功', out.ok === true && out.hash === shortHash(hash), JSON.stringify(out))
+    check('save：图片本体复制进 qq-bridge-stickers/', existsSync(join(dir, 'qq-bridge-stickers', `${hash}.png`)))
+    check('save：file 是相对 statePath 的路径', out.file === `qq-bridge-stickers/${hash}.png`, String(out.file))
+    const onDisk = loadStickers(join(dir, 'qq-bridge-stickers.json'))
+    check(
+      'save：登记表已落盘（source 记了群号）',
+      onDisk.stickers[hash]?.source === 'group:770156738' && onDisk.stickers[hash]?.mood === '无语',
+      JSON.stringify(onDisk.stickers[hash]),
+    )
+  }
+
+  // save：缺参数 / 找不到源图 → 清晰错误
+  {
+    const noMood = JSON.parse(await stickerTool.execute({ action: 'save', description: 'x' }))
+    check('save：缺 mood/description → 清晰错误', noMood.ok === false && String(noMood.error).includes('mood'), JSON.stringify(noMood))
+    const noArgs = JSON.parse(await stickerTool.execute({ action: 'save', mood: '无语', description: 'x' }))
+    check('save：既没 hash 也没 fromLast → 清晰错误', noArgs.ok === false && String(noArgs.error).includes('fromLast'), JSON.stringify(noArgs))
+    const noSrc = JSON.parse(await stickerTool.execute({ action: 'save', hash: 'deadbeef', mood: '无语', description: 'x' }))
+    check('save：找不到源图 → 提示先让群友发一张', noSrc.ok === false && String(noSrc.error).includes('让群友发一张图'), JSON.stringify(noSrc))
+  }
+
+  // list：紧凑列表（短哈希 / mood / 描述 / 大小）+ mood 过滤
+  {
+    const out = JSON.parse(await stickerTool.execute({ action: 'list' }))
+    const first = out.stickers?.[0]
+    check(
+      'list：返回短哈希 / mood / 描述 / 大小',
+      out.count === 1 && first?.hash === shortHash(hash) && first?.mood === '无语' && first?.bytes === png.length,
+      JSON.stringify(out),
+    )
+    const filtered = JSON.parse(await stickerTool.execute({ action: 'list', mood: '开心' }))
+    check('list：按 mood 过滤（没有该情绪时给提示）', filtered.count === 0 && String(filtered.note).includes('开心'), JSON.stringify(filtered))
+  }
+
+  // send：真发一张（base64 出站，不走本地路径）
+  {
+    stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'qq-bridge' } } })
+    stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/start', data: { turn: 1 } })
+
+    const noDest = JSON.parse(await stickerTool.execute({ action: 'send', hash }))
+    check('send：没有目的地 → 清晰错误', noDest.ok === false && String(noDest.error).includes('目的地'), JSON.stringify(noDest))
+
+    const sent = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '770156738' }))
+    check('send：按 hash 发送成功', sent.ok === true && sent.hash === shortHash(hash), JSON.stringify(sent))
+
+    const socket = sockets.find((s) => s.readyState === 1)
+    const call = socket?.sent.find((m) => m.action === 'send_group_msg')
+    check('send：走 send_group_msg 且带上群号', !!call && String(call.params.group_id) === '770156738', JSON.stringify(call?.action))
+    const file = String(call?.params?.message?.[0]?.data?.file ?? '')
+    check('send：图片走 base64://（不用本地路径）', file.startsWith('base64://') && !file.includes(dir), file.slice(0, 24))
+    check('send：base64 解出来就是原图', Buffer.from(file.slice('base64://'.length), 'base64').equals(png))
+
+    const after = loadStickers(join(dir, 'qq-bridge-stickers.json'))
+    check(
+      'send：更新 sentCount / lastSentAt',
+      after.stickers[hash]?.sentCount === 1 && typeof after.stickers[hash]?.lastSentAt === 'number',
+      JSON.stringify(after.stickers[hash]),
+    )
+    const st = JSON.parse(await status2.execute({}))
+    const ob = st.recentOutbox[st.recentOutbox.length - 1]
+    check(
+      'send：记 outbox（via tool / action sticker）',
+      ob?.via === 'tool' && ob?.action === 'sticker' && String(ob?.text).includes(`[表情包#${shortHash(hash)}]`),
+      JSON.stringify(ob),
+    )
+
+    const byMood = JSON.parse(await stickerTool.execute({ action: 'send', mood: '无语', userId: '1001' }))
+    check('send：只给 mood 时随机挑一张（私聊）', byMood.ok === true && byMood.hash === shortHash(hash), JSON.stringify(byMood))
+    const second = socket?.sent.filter((m) => m.action === 'send_private_msg').pop()
+    check('send：私聊走 send_private_msg', String(second?.params?.user_id) === '1001', JSON.stringify(second?.action))
+
+    const unknown = JSON.parse(await stickerTool.execute({ action: 'send', mood: '不存在' }))
+    check('send：mood 没有匹配 → 指向 list', unknown.ok === false && String(unknown.error).includes('list'), JSON.stringify(unknown))
+    const neither = JSON.parse(await stickerTool.execute({ action: 'send' }))
+    check('send：hash 与 mood 都不给 → 清晰错误', neither.ok === false, JSON.stringify(neither))
+    const bad = JSON.parse(await stickerTool.execute({ action: 'nonsense' }))
+    check('未知 action → 错误而非抛异常', bad.ok === false && Array.isArray(bad.valid), JSON.stringify(bad))
+  }
+
+  // 不受 debugTools 限制：关掉调试工具，表情包工具仍在
+  {
+    const registered3 = []
+    const ctx3 = {
+      ...ctxS,
+      tools: { register: (d) => registered3.push(d) },
+      effect: () => {},
+      settings: { register: () => ({}), get: () => ({}) },
+    }
+    apply(ctx3, { targetSessionId: 'session-x', statePath: join(dir, 'state-nodebug.json'), debugTools: false, onebotUrl: '' })
+    check(
+      'qq_bridge_sticker 不受 debugTools 限制',
+      registered3.some((t) => t.name === 'qq_bridge_sticker') && !registered3.some((t) => t.name === 'qq_bridge_status'),
+      registered3.map((t) => t.name).join(','),
+    )
+  }
+
+  // 收尾：停掉传输、还原全局、删临时目录（不留给下一次运行）
+  for (const d of disposers) {
+    try {
+      d()
+    } catch {
+      /* 已经停了 */
+    }
+  }
+  globalThis.WebSocket = savedWebSocket
+  if (savedHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = savedHome
+  rmSync(dir, { recursive: true, force: true })
+}
+
+// 用例用过的临时图片：留着只会在 %TEMP% 里积垃圾
+rmSync(cachedImagePath, { force: true })
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 

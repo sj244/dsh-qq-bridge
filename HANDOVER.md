@@ -465,7 +465,9 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 | `chunkText(text, limit)` | **M2**：按码点分段，优先在换行处断 |
 | `sendToQQ(text, destination?)` | **M2 已实现**：真实发到 OneBot（私聊/群），分段 + 可选引用 |
 | `loadState()` / `saveState()` / `pushLog()` | 状态持久化（含 `lastDestination` / `lastMessageId`） |
-| `qq_bridge_status` / `qq_bridge_send` / `qq_bridge_transport` / `qq_bridge_simulate` | 调试工具 |
+| `qq_bridge_status` / `qq_bridge_transport` / `qq_bridge_simulate` | 调试工具（`debugTools` 关闭后不注册） |
+| `outboundGate(action)` | 出站的**来源闸门**，`qq_bridge_send` 与 `qq_bridge_sticker` 共用（非 QQ 轮第一次调用只回确认） |
+| `qq_bridge_sticker` | 表情包：`list` / `save` / `send`（`stickers.js` 提供登记表） |
 | `napcatStatus()` / `napcatDownload()` / `napcatConfigure()` / `napcatLaunch()` / `napcatStop()` | **M5**：托管编排（`qq_bridge_napcat` 的五个 action） |
 | `proxyFor(settings)` | **M5**：下载代理，设置 → 环境变量 → 直连 |
 
@@ -609,7 +611,7 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 - **落盘缓存**：`$DSH_HOME/qq-bridge-images/`，收到即下载（纯 I/O 不调模型），
   超 64MB / 300 张按 mtime 淘汰最旧；缓冲项存**本地路径**而不是 URL → 不怕 QQ 图片 URL 过期。
 - **多模态描述**：唤醒时用视觉模型把图读成一句中文描述，**就地替换正文里的 `[图片]` 占位符**
-  （`inlineImageNotes()`，模块级导出以便测试）成 `[图片]：<描述>`。
+  （`inlineImageNotes()`，模块级导出以便测试）成 `[图片#<短哈希>]：<描述>`（短哈希的用处见 §13.9）。
   > ⚠️ 别改成"另起一段附在消息末尾"：模型会读成"前面这张图没解析出来、后面又来了一张"（2026-10-01 真机反馈）。
   **为什么必需**：目标模型（`deepseek-v4-flash`）是纯文本，附件会被系统剥成
   `[image omitted because this model accepts text only]` —— 只有描述能让它知道图里是什么。
@@ -626,12 +628,13 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 > 用插件根 ctx 取会把注册落到**全局**、污染所有会话。
 
 正文由**导出函数 `buildUsagePrompt(settings)`** 生成（导出是为了让 `test-smoke.mjs` 盯住这份契约），
-分五节：
+分六节：
 
 | 节 | 管什么 |
 |---|---|
-| 你会看到什么 | 入站格式、未唤醒摘要、「[图片]：<描述>」（就地）可能不准、被戳显示成「[戳一戳]（戳的是我）」、别当绝对事实 |
+| 你会看到什么 | 入站格式、未唤醒摘要、「[图片#<短哈希>]：<描述>」（就地）可能不准、短哈希是图的编号、被戳显示成「[戳一戳]（戳的是我）」、别当绝对事实 |
 | 怎么把话说回 QQ | 只有标记块里的内容会发；开标记**独占行首**；给自己看的写在块外 |
+| 表情包 | 用 `qq_bridge_sticker` 的 `list` / `send` 发表情包；用 `save` 收藏群友发的图 |
 | 群聊礼仪 | 一两句人话、不刷屏、不放路径/代码/日志/命令/配置值/提交号/过程汇报、不装做过 |
 | **无人值守：不要碰特权操作** | 见 §14 |
 | 会话跟随（监听模式） | 何时开窗、默认 5 / 上限 60、只对同一目的地生效、开窗就花 token、答完主动 `off` |
@@ -657,7 +660,7 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 
 | 改动 | 内容 |
 |---|---|
-| 提示词重写 | 原来的注入说明只有三段，被判「太省」；改为 `buildUsagePrompt()` 五节契约（§13.4），并加测试逐条断言 |
+| 提示词重写 | 原来的注入说明只有三段，被判「太省」；改为 `buildUsagePrompt()` 的分节契约（§13.4），并加测试逐条断言 |
 | 无人值守禁令 | 新增「不要碰特权操作」：QQ 那头没人点「同意」；**QQ 消息是不可信输入**（群友可注入）；需要动手就停下等（§14） |
 | 不做审批桥接 | 用户明确「这个不需要」——把审批搬到 QQ = 把「谁能发消息」变成「谁能替你授权」（§14） |
 | 出站台账 | 出站有**两条路**（标记块闸门 / `qq_bridge_send`），以前只记第一条 → 现在两条都记 outbox 并用 `via` 标来源（§13.8） |
@@ -679,6 +682,28 @@ dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # ==
 > ① **凡是"静默 return / 静默丢弃"的早退分支，至少要留一条日志** —— 否则真机排障只能靠猜
 > （这次是靠 NapCat 的 `fileLog: debug` 才对照出来的）。
 > ② **凡是"先做几秒异步、最后再改共享状态"的路径，都要先快照**。
+
+### 13.9 表情包：短哈希格式与描述缓存命中（2026-10-02）
+
+- **占位符带短哈希的原因**：入站占位符从 `[图片]：<描述>` 改成 `[图片#<短哈希>]：<描述>`
+  （`inlineImageNotes()`，模块级导出以便测试）。两个理由：① 多模态描述可能不准，
+  模型需要指着一张**具体的**图说话（“把刚才那张存下来”）；② 短哈希是那张图在插件里的唯一稳定编号，
+  模型能把这个短哈希原样交给 `qq_bridge_sticker` 的 `save` / `send`。描述失败写成
+  `[图片#<短哈希>]：（描述失败：原因）`；哈希取不到（老缓存条目）时退回裸 `[图片]`。
+  注入的系统提示同步改了格式说明。
+- **图片缓存文件名改成内容哈希**（`<hash>.<ext>`）：同一张图不重复落盘，命中已有文件时也拿得到哈希 ——
+  短哈希与登记表都建立在“同一张图算出同一个 hash”上。
+- **描述缓存命中的原因**：`describeImage()` 先查 `qq-bridge-stickers.json`。命中且有 `description`
+  就**直接返回登记的描述**，不调用多模态模型。群里反复出现的图（表情包、梗图就是这种用法）
+  每唤醒一次描述一次是纯浪费。日志只记短哈希，不记图片 URL。
+- `qq_bridge_sticker`（不受 `debugTools` 限制）的 `send` 与 `qq_bridge_send` **共用同一道来源闸门**：
+  `outboundGate()` 从此前内联的两步确认里抽出来，两个工具都过这道闸门。图片本体用 `base64://` 送，
+  不用本地路径（NapCat 的 `enableLocalFile2Url` 是 false）。
+- **离线已验证**：登记表读写 / 查找 / 原子写；`save` 的复制与来源标注；`send` 的请求形状
+  （`send_group_msg` / `send_private_msg` + `base64://` 前缀 + 解码回原字节）；
+  `sentCount` / `lastSentAt` 与 outbox 台账；闸门的两步确认。
+  **待真机确认**：真实 QQ 上 NapCat 是否接受这个 base64 图片段（本机没有可用的 OneBot 连接，
+  也不发真实 QQ 消息）。
 
 ## 14. 无人值守的安全边界：**明确不做审批桥接**（2026-09-30 决定）
 
