@@ -1,7 +1,7 @@
 /**
  * dsh-qq-bridge —— 浏览器半（client half）
  *
- * 作用：在 **设置 → 插件 → 插件配置** 里放一张名为「QQ 桥接」的卡片，
+ * 作用：在 **设置 → 插件 → 插件配置** 里放一张名为“QQ 桥接”的卡片，
  * 用来改昵称、白名单、唤醒概率、目标会话这些设置 —— 也就是用户要的那个界面。
  *
  * 为什么这里的东西长得不像源码：
@@ -122,7 +122,7 @@ window.__ModuleLoader__.load({
         },
       },
       { key: 'selfId', label: '机器人 QQ', kind: 'text', hint: '留空 = 连上后自动获取。' },
-      // ↓ 这些键以前只在 Schema 里、卡片上没做输入框，等于"设了也改不了"（用户报的正是这个）
+      // ↓ 这些键以前只在 Schema 里、卡片上没做输入框，等于“设了也改不了”（用户报的正是这个）
       {
         key: 'visionModel',
         label: '识图模型',
@@ -179,7 +179,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 会话下拉的选项：真实的会话列表 + 「不驱动」+ 一个兜底项。
+     * 会话下拉的选项：真实的会话列表 + “不驱动”+ 一个兜底项。
      *
      * **归档的会话不列出来**（用户报的 bug：下拉里混进了一堆早就归档的会话）——
      * 归档集在 workspace 域：`ctx.workspaces.list.getSnapshot().archivedSessionIds`。
@@ -271,6 +271,19 @@ window.__ModuleLoader__.load({
       note: { fontSize: '12px', opacity: 0.7 },
       err: { fontSize: '12px', color: '#e5534b' },
       overridden: { fontSize: '11px', opacity: 0.5, marginLeft: '4px' },
+      // “撤销覆盖”：与“·已覆盖”并排的小按钮。文案本身就是动作，不加图标。
+      link: {
+        marginLeft: '4px',
+        padding: '0 4px',
+        border: 'none',
+        background: 'transparent',
+        color: 'inherit',
+        opacity: 0.75,
+        textDecoration: 'underline',
+        cursor: 'pointer',
+        font: 'inherit',
+        fontSize: '11px',
+      },
       ops: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
     }
 
@@ -303,7 +316,7 @@ window.__ModuleLoader__.load({
 
       // ── 目标会话的下拉数据源 ──────────────────────────────────────────────
       // ctx.sessions.list 是客户端 SDK 暴露的会话列表快照（ObservableSnapshot）。
-      // 取不到（这个部署没装 sessions 服务、或它还没就绪）就退回「只有兜底项」，
+      // 取不到（这个部署没装 sessions 服务、或它还没就绪）就退回“只有兜底项”，
       // 卡片本身照常渲染 —— 宁可少一个下拉，也不要整张卡片消失。
       const sessions = props.sessionsOf ? props.sessionsOf() : undefined
       const listStore = sessions && sessions.list && typeof sessions.list.getSnapshot === 'function' ? sessions.list : undefined
@@ -319,7 +332,7 @@ window.__ModuleLoader__.load({
       }, [sessions])
 
       // 归档集在 workspace 域：ctx.workspaces.list 的快照里有 archivedSessionIds
-      //（"Complete registry-global archive set"）。取不到就当作「没有归档的会话」——
+      //（“Complete registry-global archive set”）。取不到就当作“没有归档的会话”——
       // 宁可多列几个，也别把用户能选的会话藏掉。
       const workspaces = props.workspacesOf ? props.workspacesOf() : undefined
       const wsStore =
@@ -376,7 +389,12 @@ window.__ModuleLoader__.load({
         setNote('')
         try {
           if (typeof fetch !== 'function') throw new Error('这个环境没有 fetch')
-          const res = await fetch(`${NAPCAT_API}/${action}`, { method: 'POST' })
+          // 显式声明 JSON：宿主接口对**带请求体**的 POST 只认 application/json。
+          // 这两个动作本身没有请求体，服务端也放行无体的 POST —— 那条是给还没刷新的旧 bundle 兜底。
+          const res = await fetch(`${NAPCAT_API}/${action}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+          })
           const body = await res.json().catch(() => ({}))
           if (!res.ok || body?.ok !== true) throw new Error(String(body?.error || `HTTP ${res.status}`))
           setNote(String(body?.message || okNote))
@@ -420,6 +438,31 @@ window.__ModuleLoader__.load({
           for (const [key, value] of writes) await scope.set(key, value)
           setDraft(null)
           setNote(writes.length === 0 ? '没有改动' : `已保存 ${writes.length} 项`)
+        } catch (e) {
+          setError(String((e && e.message) || e))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      /**
+       * 撤销一个字段的本机覆盖。
+       *
+       * 设置读取优先级是“设置文件 > composition config”。卡片只发 set 时，
+       * 用户从插件配置页改的值会被设置文件里的旧值盖住，且没有地方撤销。
+       * 这里走设置源的 unset：清掉那一项，该键回落到 composition config 的值，
+       * 刷新后“·已覆盖”标记消失。
+       */
+      async function unsetOverride(key) {
+        const field = FIELDS.find((f) => f.key === key)
+        setBusy(true)
+        setError('')
+        setNote('')
+        try {
+          if (typeof scope.unset !== 'function') throw new Error('这个设置源不支持撤销覆盖')
+          await scope.unset(key)
+          setDraft(null)
+          setNote(`已撤销「${field ? field.label : key}」的本机覆盖`)
         } catch (e) {
           setError(String((e && e.message) || e))
         } finally {
@@ -500,7 +543,28 @@ window.__ModuleLoader__.load({
             spellCheck: false,
           })
         }
-        rows.push(h('div', { key: f.key, style: S.label }, f.label, overridden ? h('span', { style: S.overridden }, '·已覆盖') : null))
+        rows.push(
+          h(
+            'div',
+            { key: f.key, style: S.label },
+            f.label,
+            overridden ? h('span', { style: S.overridden }, '·已覆盖') : null,
+            // 每个字段都有自己的标签格，所以逐字段放按钮对所有类型都成立 —— 不必只给一个统一按钮。
+            overridden
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: disabled(S.link, busy || !snap.writable),
+                    disabled: busy || !snap.writable,
+                    title: '清掉设置文件里的这一项，回落到 composition config 的值',
+                    onClick: () => unsetOverride(f.key),
+                  },
+                  '撤销覆盖',
+                )
+              : null,
+          ),
+        )
         rows.push(
           h(
             'div',
@@ -519,7 +583,7 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // 「打开 WebUI」只在真读到 webui.json 时可点 —— 地址里带着 token，不给猜的余地。
+      // “打开 WebUI”只在真读到 webui.json 时可点 —— 地址里带着 token，不给猜的余地。
       const webuiUrl = napcat && typeof napcat.webuiUrl === 'string' ? napcat.webuiUrl : ''
       // 宿主报的 running 是权威判据（含外部启动的 NapCat）。拿不到状态时按未运行处理。
       const napcatRunning = napcat !== null && napcat.running === true
@@ -617,16 +681,16 @@ window.__ModuleLoader__.load({
     const inject = ['slots']
 
     // TODO(0.2.0): 平台把第三方插件的设置桥接上之后（web-all / DSH 修完 #677 的迁移），
-    // 可以砍掉多余候选 key 与卡片上那行「诊断」；`namespaces` / `detail()` 建议保留（排障用）。
+    // 可以砍掉多余候选 key 与卡片上那行“诊断”；`namespaces` / `detail()` 建议保留（排障用）。
     // 详见 docs/dsh-0.2.0-migration.md 的 TODO 节。
     /**
      * 绑一个**可写的**设置域。导出（经 __test）以便离线测试。
      *
-     * 两代 DSH 对"这个插件的设置"用的 key 不一样：
+     * 两代 DSH 对“这个插件的设置”用的 key 不一样：
      *   0.1.5-rc.3：settings 命名空间 —— `qq-bridge`（宿主半 register 出来的）；
      *   0.2.0     ：profile **entry id** —— `include:qq-bridge`（由插件自己的 Config 投影而来）。
-     * 只绑前者的话，0.2.0 上永远拿到 `unavailable`，用户看到的就是"这个部署没有为 qq-bridge
-     * 提供可写的设置服务"（2026-10-01 桌面端真机）。所以**两个都绑，谁 ready 用谁**。
+     * 只绑前者的话，0.2.0 上永远拿到 `unavailable`，用户看到的就是“这个部署没有为 qq-bridge
+     * 提供可写的设置服务”（2026-10-01 桌面端真机）。所以**两个都绑，谁 ready 用谁**。
      */
     /** 0.2.0 的兜底数据源：宿主自己挂的本机接口（见宿主半的 handleSettingsRequest）。 */
     const API_PATH = '/api/qq-bridge/settings'
@@ -707,17 +771,29 @@ window.__ModuleLoader__.load({
           if (!res.ok || body?.ok !== true) throw new Error(body?.error || `HTTP ${res.status}`)
           accept(body)
         },
+        /** 撤销一个字段的本机覆盖：接口本来就支持 `unset`，这里只是把它暴露给卡片。 */
+        unset: async (field) => {
+          if (typeof fetch !== 'function') throw new Error('qq-bridge: 这个环境没有 fetch')
+          const res = await fetch(API_PATH, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ unset: [field] }),
+          })
+          const body = await res.json().catch(() => ({}))
+          if (!res.ok || body?.ok !== true) throw new Error(body?.error || `HTTP ${res.status}`)
+          accept(body)
+        },
       }
     }
 
     /**
      * 绑一个**可写的**设置域。导出（经 __test）以便离线测试。
      *
-     * 两代 DSH 对"这个插件的设置"用的 key 不一样：
+     * 两代 DSH 对“这个插件的设置”用的 key 不一样：
      *   0.1.5-rc.3：settings 命名空间 —— `qq-bridge`（宿主半 register 出来的）；
      *   0.2.0     ：profile **entry id** —— `include:qq-bridge`（由插件自己的 Config 投影而来）。
-     * 只绑前者的话，0.2.0 上永远拿到 `unavailable`，用户看到的就是"这个部署没有为 qq-bridge
-     * 提供可写的设置服务"（2026-10-01 桌面端真机）。所以**两个都绑、谁 ready 用谁**；
+     * 只绑前者的话，0.2.0 上永远拿到 `unavailable`，用户看到的就是“这个部署没有为 qq-bridge
+     * 提供可写的设置服务”（2026-10-01 桌面端真机）。所以**两个都绑、谁 ready 用谁**；
      * **全都不 ready** 时再退到宿主自己的本机接口（0.2.0 的兜底，见 createApiScope）。
      */
     function bindSettings(service) {
@@ -796,6 +872,17 @@ window.__ModuleLoader__.load({
           if (api.getSnapshot().status === 'ready') return api.set(field, value)
           throw new Error('qq-bridge: 没有可写的设置源')
         },
+        /**
+         * 撤销一个字段的本机覆盖。
+         *
+         * 优先用设置域自己的 `unset`（DSH 的 SettingsScope 有这个能力）；
+         * 设置域没有它时走本机接口的 `unset`（宿主半的 handleSettingsRequest 本来就支持）。
+         */
+        unset: (field) => {
+          const candidate = readyScope()
+          if (candidate && typeof candidate.scope.unset === 'function') return candidate.scope.unset(field)
+          return api.unset(field)
+        },
       }
     }
 
@@ -815,14 +902,14 @@ window.__ModuleLoader__.load({
         registered = true
         // 两个 key 都绑，谁 ready 用谁（0.1.5 的命名空间 vs 0.2.0 的 entry id）。
         const scope = bindSettings(service)
-        // sessionsOf 用「取的时候再解析」而不是现在取一次：
+        // sessionsOf 用“取的时候再解析”而不是现在取一次：
         // sessions 服务可能比本插件晚出现，也可能这个部署根本没装 —— 那时卡片照常渲染，
         // 只是目标会话那一栏只有一个兜底项，而不是整张卡片消失。
         const card = () =>
           h(Card, { scope, sessionsOf: () => ctx.get('sessions'), workspacesOf: () => ctx.get('workspaces') })
 
         // slot 也各注册一遍：`slots.inject(slot, factory)` 只在那个 slot 存在时才跑 factory，
-        // 所以多注入一个是安全的；外面再包一层 try，兜住"slot 不存在就直接抛错"的实现。
+        // 所以多注入一个是安全的；外面再包一层 try，兜住“slot 不存在就直接抛错”的实现。
         const registerCard = (slot, options) => {
           try {
             scoped.slots.inject(slot, () => scoped.slots.register({ ...options, name: slot }, card))

@@ -1,8 +1,8 @@
-// dsh-qq-bridge — 把一个「固定的」DSH 会话接到 QQ（OneBot / NapCat）。
+// dsh-qq-bridge — 把一个“固定的”DSH 会话接到 QQ（OneBot / NapCat）。
 //
 // 设计见同目录 DESIGN.md。核心两点：
 //   1) 唤醒策略：白名单(fail-closed) → 命中昵称/@ 必唤醒 → 否则按概率(默认 5%)唤醒
-//      → 其余只进「最近聊天缓冲」，在下一次唤醒时作为上下文附上（期间零模型调用）。
+//      → 其余只进“最近聊天缓冲”，在下一次唤醒时作为上下文附上（期间零模型调用）。
 //   2) 目标会话显式加载：agents.get(id) 拿不到就 agents.resume(resumeSessionId) 拉起来，
 //      并且【绝不】回退到别的会话（dsh-cron 的已知坑：roots() 找不到就投给活动会话）。
 //
@@ -54,11 +54,11 @@ export const name = 'qq-bridge'
 
 export const inject = ['agents', 'tools', 'settings']
 
-// 导出是为了让测试能断言「浏览器半的卡片 key」与它一致 —— 不一致的话界面上会静默什么都不出现。
+// 导出是为了让测试能断言“浏览器半的卡片 key”与它一致 —— 不一致的话界面上会静默什么都不出现。
 export const NS = 'qq-bridge'
 
 /**
- * 这个宿主的 `settings` 服务是不是"老模型"（有 register/get）。导出以便测试。
+ * 这个宿主的 `settings` 服务是不是“老模型”（有 register/get）。导出以便测试。
  *
  * DSH #677 / 0.2.0 删掉了 register/get：设置表单改为从插件自己的 `Config` schema 派生。
  * 判断必须**按方法探测**，不能按版本号 —— 老版本里 register 在，新版本里它只是没了；
@@ -76,7 +76,7 @@ const PACKAGE = 'dsh-qq-bridge'
  *
  * DSH 0.2.0 的消息格式 v4 **废弃了 `{ kind: 'plugin', plugin }` 包装**：
  * `assertV4MessageSources` 会对 `kind === 'plugin'` 直接抛
- * "format v4 message requires a producer-owned source kind"（真机 2026-10-01，QQ 唤醒的轮次整个失败）。
+ * “format v4 message requires a producer-owned source kind”（真机 2026-10-01，QQ 唤醒的轮次整个失败）。
  * 正确形状是 producer-owned 的 `{ kind: 'plugin:<包名>' }`（= 格式迁移里 `producerKind()`
  * 对未知第三方插件产出的结果）。0.1.5 仍是 v3，保留老写法。
  */
@@ -88,11 +88,13 @@ const PACKAGE_NAME = 'dsh-qq-bridge'
 const MAX_BUFFER = 200
 const MAX_LOG = 200
 const MAX_OUTBOX = 50
+/** 出站**丢弃台账**的环形上限（只记 `dropped: true` 的结果，与 outbox 分开）。 */
+const MAX_DROPPED = 20
 /** 单条**入站**消息进模型上下文的上限（防有人贴一篇长文把上下文撑爆）。 */
 const MAX_INBOUND_CHARS = 4000
-/** 单条消息**进缓冲**的上限 —— 缓冲是"闲聊摘要"，不需要全文。 */
+/** 单条消息**进缓冲**的上限 —— 缓冲是“闲聊摘要”，不需要全文。 */
 const MAX_BUFFER_ITEM_CHARS = 500
-/** 整个"未唤醒聊天摘要"的总上限（从最新往回装，装不下就丢更早的）。
+/** 整个“未唤醒聊天摘要”的总上限（从最新往回装，装不下就丢更早的）。
  *  QQ 群闲聊很短，8 条 × 一两百字足够了；给多了纯属浪费上下文。 */
 const MAX_DIGEST_CHARS = 1200
 /** 单条缓冲消息最多存几个图片 URL。 */
@@ -176,7 +178,7 @@ const BridgeSettings = Schema.object({
 })
 
 /** OneBot 非文本消息段 → 可读占位符。
- *  **绝不让整条消息因为"全是非文本段"而变成空字符串** —— 那样会被上层直接丢掉，
+ *  **绝不让整条消息因为“全是非文本段”而变成空字符串** —— 那样会被上层直接丢掉，
  *  用户发个表情包就等于什么都没发生。纯元数据段（reply/rps/dice）返回 undefined = 跳过。
  *  @type {Record<string, string | ((data: any) => string) | undefined>} */
 const SEGMENT_LABELS = {
@@ -210,16 +212,20 @@ export function labelForSegment(type, data) {
 /**
  * 把正文里的 `[图片]` 占位符**就地**换成 `[图片#<短哈希>]：描述`。导出是为了可测试。
  *
- * 为什么不再把描述另起一段附在消息末尾：那样模型看到的是
- * 「…[图片] 文字」+ 末尾一段「[图片]：描述」，会读成"前面这张图没解析出来、
- * 后面又来了一张" —— 位置本身就是信息。（2026-10-01 用户真机反馈。）
+ * 为什么不再把描述另起一段附在消息末尾：模型会读到两段 —— 正文里的“[图片] 文字”，
+ * 加上末尾的“[图片]：描述”。两段合起来会被读成“前面这张图没解析出来、
+ * 后面又来了一张”。位置本身就是信息。（2026-10-01 用户真机反馈。）
  *
- * 为什么占位符里带短哈希：描述"可能不准"，而模型需要**指着一张具体的图**说话
- * （"把刚才那张存下来"）。短哈希是那张图在插件里唯一的稳定标识，模型能把它原样交给
+ * 为什么占位符里带短哈希：描述“可能不准”，而模型需要**指着一张具体的图**说话
+ *（“把刚才那张存下来”）。短哈希是那张图在插件里唯一的稳定标识，模型能把它原样交给
  * `qq_bridge_sticker` 的 `save` / `send`。哈希取不到时退回不带 # 的 `[图片]`。
  *
  * `noteById` 的值形如 `{ text, hash }`（也接受裸字符串 = 只有 text）。
- * 按 images 顺序逐个对上占位符；多出来的占位符留原样，没有描述的标「（未描述）」。
+ *
+ * ⚠️ `images` 必须与正文里的占位符**逐位对齐**：第 n 个元素对应第 n 个占位符。
+ * 元素为 `null` 表示那张图没有描述（落盘失败）—— 该占位符写成 `[图片]（未描述）`，
+ * 并且**不占用**其它图片的描述（后面的图不得往前顶位）。
+ * 多出来的占位符留原样。
  */
 export function inlineImageNotes(text, images, noteById) {
   const list = Array.isArray(images) ? images : []
@@ -243,7 +249,7 @@ export function inlineImageNotes(text, images, noteById) {
  * **不是消息段** —— 早先只处理 `post_type === 'message'`，所以被戳等于没被戳（2026-10-01 用户要求适配）。
  * 兼容几种写法：v11 的 `notify+poke`，以及部分实现直接给的 `poke` / `group_poke` / `friend_poke`。
  *
- * 只有**戳我**才算"叫我一声"（`atSelf: true`，与 @ 同级必唤醒）；戳别人照样进策略、但只记录。
+ * 只有**戳我**才算“叫我一声”（`atSelf: true`，与 @ 同级必唤醒）；戳别人照样进策略、但只记录。
  * 返回 null = 不是戳一戳 / 自己戳自己（防回环）/ 不是 notice。
  */
 export function mapOneBotNotice(event, selfId) {
@@ -303,8 +309,8 @@ export function apply(ctx, config) {
   //   0.2.0     ：register/get **已被删除**，表单改为从插件自己的 `Config` schema 派生，
   //               宿主用 describe/update/replace/mutate 直接读写这个 entry 的配置。
   // ⚠️ 在 0.2.0 上再无条件调 register，会在 `apply()` 里抛 TypeError → **整条 fiber failed**；
-  //    而客户端半因为包里声明了 `dsh.client` 照样进 boot graph，现象是"设置页有 tab、
-  //    卡片却说没有可写设置服务"（2026-10-01 桌面端真机）。同机型旁证：`dsh-at-file` 也调
+  //    而客户端半因为包里声明了 `dsh.client` 照样进 boot graph，现象是“设置页有 tab、
+  //    卡片却说没有可写设置服务”（2026-10-01 桌面端真机）。同机型旁证：`dsh-at-file` 也调
   //    register，同样 failed。所以这里**按方法探测**，不按版本号。
   const settingsService = ctx.settings
   const legacySettings = hasLegacySettings(settingsService)
@@ -430,7 +436,7 @@ export function apply(ctx, config) {
       settingsFileCache = { mtimeMs: st.mtimeMs, values }
       return values
     } catch {
-      // 文件不存在/坏了都当"没有覆盖"，回落到 config。
+      // 文件不存在/坏了都当“没有覆盖”，回落到 config。
       settingsFileCache = { mtimeMs: -1, values: {} }
       return {}
     }
@@ -459,10 +465,94 @@ export function apply(ctx, config) {
     res.end(body)
   }
 
-  /** 只服务本机：这个接口能改设置，不能暴露给局域网 / 远程 GUI。 */
-  function isLoopback(req) {
+  /** 回环对端地址：`127.0.0.1`、`::1`，以及 IPv4 映射形态 `::ffff:127.0.0.1`。 */
+  function isLoopbackAddress(addr) {
+    const a = String(addr ?? '')
+    return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1'
+  }
+
+  /** 回环主机名：`127.0.0.1`、`localhost`、`::1`；端口不参与判定。 */
+  function isLoopbackHost(host) {
+    const h = String(host ?? '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1'
+  }
+
+  /** 从 `Origin` / `Referer` 里取主机名。取不到、或不是合法 URL 时返回 `null`。 */
+  function originHostOf(value) {
+    const raw = String(value ?? '').trim()
+    if (raw === '') return null
+    try {
+      return new URL(raw).hostname
+    } catch {
+      return null
+    }
+  }
+
+  /** `content-type` 是否声明了 JSON 请求体。大小写不敏感，允许带 `; charset=…`。 */
+  function isJsonContentType(req) {
+    return String(req?.headers?.['content-type'] ?? '').toLowerCase().startsWith('application/json')
+  }
+
+  /**
+   * 请求是否声明了非空请求体：`content-length` 大于 0，或带 `transfer-encoding`。
+   * 两条都不满足时按“没有请求体”处理 —— 调用方读到的也确实是空串。
+   */
+  function requestHasBody(req) {
+    const headers = req?.headers ?? {}
+    const length = Number(headers['content-length'])
+    if (Number.isFinite(length) && length > 0) return true
+    return String(headers['transfer-encoding'] ?? '').trim() !== ''
+  }
+
+  /**
+   * 本机接口的准入判定：对端回环地址 + 请求来源 + 带体 POST 的 `content-type`。
+   *
+   * ⚠️ 只查对端地址不够。用户浏览器里的任意网页都能用无预检的 `fetch`
+   * （`mode: 'no-cors'`）打到 `http://127.0.0.1:<port>`：响应读不到，但副作用照发生 ——
+   * 改 `whitelist` / `targetSessionId`、POST `/api/qq-bridge/napcat/launch` 启动 NapCat。
+   * 对端地址挡不住这条路：请求确实发自本机，发起者是**浏览器里的别的页面**。
+   *
+   * `content-type` 只在请求体非空时要求 `application/json`，理由有两条：
+   * ① 跨站 `fetch` 用 `mode: 'no-cors'` 时，`content-type` 只能是 CORS 安全列表里的值
+   * （`text/plain`、`application/x-www-form-urlencoded`、`multipart/form-data`），
+   * 所以“带体的 POST 必须声明 JSON”已经把这条攻击挡住；
+   * ② 空体的 POST 改不了任何东西：设置接口没有请求体就没有 `set` / `unset`，
+   * NapCat 的三个动作只由 URL 决定。来源判定对所有请求都生效，那才是主防线。
+   *
+   * 判定顺序固定：地址 → 来源 → 带体 POST 的 `content-type`。放行返回 `null`，拒绝返回中文原因。
+   */
+  function checkLocalRequest(req) {
     const addr = String(req?.socket?.remoteAddress ?? '')
-    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+    if (!isLoopbackAddress(addr)) {
+      return `只接受本机请求（对端地址 ${addr === '' ? '未知' : addr}）。这个接口能改设置、也能启动 NapCat，不对外网或局域网开放。`
+    }
+    // 有 Origin 就只认它；没有 Origin 才看 Referer。两者都没有 = 命令行工具或卡片同源请求，放行。
+    const origin = String(req?.headers?.origin ?? '').trim()
+    const referer = String(req?.headers?.referer ?? '').trim()
+    const source = origin !== '' ? origin : referer
+    if (source !== '') {
+      const host = originHostOf(source)
+      if (host === null || !isLoopbackHost(host)) {
+        return `只接受本机页面发来的请求（来源 ${source} 不是本机）。请在本机打开的 DSH 界面里操作。`
+      }
+    }
+    if (String(req?.method ?? '').toUpperCase() === 'POST' && requestHasBody(req) && !isJsonContentType(req)) {
+      const got = String(req?.headers?.['content-type'] ?? '')
+      return `带请求体的 POST 只接受 application/json（当前 content-type：${got === '' ? '空' : got}）。请补上 content-type: application/json 再试。`
+    }
+    return null
+  }
+
+  /**
+   * 设置接口与 NapCat 路由共用的准入闸门：放行返回 `false`，拒绝回 403 并返回 `true`。
+   * 两处各写一遍必然漏掉一边，所以统一走这一个函数。
+   */
+  function rejectLocalRequest(req, res) {
+    const reason = checkLocalRequest(req)
+    if (reason === null) return false
+    logger.warn(`本机接口拒绝了请求（${String(req?.method ?? '?')} ${String(req?.url ?? '')}）：${reason}`)
+    sendJson(res, 403, { ok: false, error: reason })
+    return true
   }
 
   async function readRequestBody(req, limit = 64 * 1024) {
@@ -483,27 +573,39 @@ export function apply(ctx, config) {
    * - `POST` → `{ set?: {...}, unset?: [...] }`：先过 schema 校验，再写文件，
    *   最后跑一遍副作用（传输重连 / 用法说明重挂）。
    *
-   * 非本机请求一律 403；只写 schema 白名单里的键。
+   * 准入判定见 `checkLocalRequest`：对端不是回环地址、来源不是本机、或 POST 没声明
+   * `application/json` 时一律 403。只写 schema 白名单里的键。
    */
   async function handleSettingsRequest(req, res) {
-    if (!isLoopback(req)) {
-      logger.warn(`设置接口拒绝了非本机请求（${req?.socket?.remoteAddress ?? '?'}）`)
-      return sendJson(res, 403, { ok: false, error: 'loopback-only' })
-    }
+    // 与 NapCat 路由共用同一道闸门，不许某一条路由自己少判一项。
+    if (rejectLocalRequest(req, res)) return
     if (req.method === 'GET') {
       return sendJson(res, 200, { ok: true, values: readSettings(), overridden: Object.keys(readSettingsFile()) })
     }
-    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
+    if (req.method !== 'POST') {
+      return sendJson(res, 405, {
+        ok: false,
+        error: `这个接口只接受 GET 与 POST（当前是 ${String(req.method ?? '?')}）。请用 GET 读取设置，或用 POST 提交设置。`,
+      })
+    }
 
     let payload
     try {
       payload = JSON.parse((await readRequestBody(req)) || '{}')
     } catch (error) {
-      return sendJson(res, 400, { ok: false, error: `bad-json: ${error?.message ?? error}` })
+      return sendJson(res, 400, {
+        ok: false,
+        error: `请求体不是合法 JSON（${error?.message ?? error}）。请检查请求体后重发。`,
+      })
     }
     const patch = payload?.set && typeof payload.set === 'object' ? payload.set : null
     const unset = Array.isArray(payload?.unset) ? payload.unset.map(String) : []
-    if (!patch && unset.length === 0) return sendJson(res, 400, { ok: false, error: 'set-or-unset-required' })
+    if (!patch && unset.length === 0) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: '请求里缺少 set 或 unset 字段。请给出 set（要改的键值）或 unset（要清掉的键）。',
+      })
+    }
 
     const known = knownSettingKeys()
     const next = { ...readSettingsFile() }
@@ -522,7 +624,10 @@ export function apply(ctx, config) {
     try {
       writeSettingsFile(next)
     } catch (error) {
-      return sendJson(res, 500, { ok: false, error: `write-failed: ${error?.message ?? error}` })
+      return sendJson(res, 500, {
+        ok: false,
+        error: `设置文件写入失败（${error?.message ?? error}）。请检查 ${settingsPath} 所在目录的写入权限。`,
+      })
     }
     // 改完立刻生效：地址变了要重连、出站方式变了要重挂提示词。
     applySettingChanges()
@@ -532,7 +637,17 @@ export function apply(ctx, config) {
   // ── state (最近聊天缓冲 / 唤醒日志 / 出站采集 / 出站目的地) ──────────────────
 
   const statePath = config.statePath || join(home, 'qq-bridge-state.json')
-  const state = { buffer: [], log: [], outbox: [], lastDestination: null, lastMessageId: null, listening: null }
+  const state = {
+    buffer: [],
+    log: [],
+    outbox: [],
+    // 出站**丢弃台账**：与 outbox 分开。outbox 的语义是“真的发到 QQ 了”，
+    // 把被拒的出站写进 outbox 就是假账。
+    dropped: [],
+    lastDestination: null,
+    lastMessageId: null,
+    listening: null,
+  }
   loadState()
 
   function loadState() {
@@ -542,6 +657,7 @@ export function apply(ctx, config) {
       if (Array.isArray(raw?.buffer)) state.buffer = raw.buffer.slice(-MAX_BUFFER)
       if (Array.isArray(raw?.log)) state.log = raw.log.slice(-MAX_LOG)
       if (Array.isArray(raw?.outbox)) state.outbox = raw.outbox.slice(-MAX_OUTBOX)
+      if (Array.isArray(raw?.dropped)) state.dropped = raw.dropped.slice(-MAX_DROPPED)
       if (raw?.lastDestination && typeof raw.lastDestination === 'object') state.lastDestination = raw.lastDestination
       if (raw?.lastMessageId !== undefined) state.lastMessageId = raw.lastMessageId
       if (raw?.listening && typeof raw.listening === 'object') state.listening = raw.listening
@@ -618,10 +734,10 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 会话跟随（listening window）：模型自己开的「继续听」窗口。
+   * 会话跟随（listening window）：模型自己开的“继续听”窗口。
    *
    * 动机：真人聊天不会每句都 @。第一次 @ 之后如果话题还在继续，模型可以开一个窗口，
-   * 让同一目的地接下来的普通消息也唤醒它 —— 也就是「线性聊天不用反复 @」。
+   * 让同一目的地接下来的普通消息也唤醒它 —— 也就是“线性聊天不用反复 @”。
    * 窗口**由模型决定**（`qq_bridge_listen` 工具），到期自动失效。
    */
   function destinationKeyOf(msg) {
@@ -649,8 +765,8 @@ export function apply(ctx, config) {
     if (listeningActive(msg)) return { action: 'wake', reason: 'listening' }
     // M2：群里的额外闸门 —— 没被 @ 就完全不处理（比概率唤醒更严）。
     if (msg.groupId && s.atOnlyInGroup && msg.atSelf !== true) return { action: 'drop', reason: 'group-not-at' }
-    // 戳一戳（notice 事件合成的入站）：戳的是我 = 和"@ 我"同级，必唤醒；
-    // 戳别人只是记录 —— 跟"叫了别人的名字"一样，不该把我叫起来。
+    // 戳一戳（notice 事件合成的入站）：戳的是我 = 和“@ 我”同级，必唤醒；
+    // 戳别人只是记录 —— 跟“叫了别人的名字”一样，不该把我叫起来。
     if (msg.poke === true && msg.atSelf === true) return { action: 'wake', reason: 'poke' }
     if (msg.atSelf === true) return { action: 'wake', reason: 'at-mention' }
     if (mentionsNickname(msg.text, s.nicknames)) return { action: 'wake', reason: 'nickname' }
@@ -663,15 +779,46 @@ export function apply(ctx, config) {
   const handles = new Map() // sessionId -> AgentHandle
 
   /**
-   * 已经注入过用法说明的会话：`sessionId -> { dispose, mode }`。
+   * 句柄是否还活着：该 agent 仍在宿主注册表里，而且是**同一个对象**。
    *
-   * 存 `mode` 是因为提示词正文里有**出站方式**（marker / tool / always）的分叉，
-   * 而 `text` 是挂载时算好的快照 —— 模式变了必须重挂。
+   * `ctx.agents.get(id)` 返回 `undefined` 就等于这个 agent 不在注册表。同一个 id 但对象
+   * 被换掉（宿主重建过 agent）时旧句柄同样作废 —— 旧对象上的 `followup()` 投不进新会话。
+   * 两代宿主都能用这一条判据，不必依赖某个卸载事件。
+   */
+  function isAgentAlive(agent) {
+    const agentId = agent?.id
+    if (!agentId || typeof ctx.agents?.get !== 'function') return false
+    try {
+      return ctx.agents.get(agentId) === agent
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 已经注入过用法说明的会话：`sessionId -> { dispose, signature }`。
+   *
+   * 存 `signature` 是因为 `text` 是挂载时算好的快照，而正文依赖若干设置值
+   * （出站方式、出站字数上限）—— 任何一个变了都必须重挂。签名由
+   * `usagePromptSignature()` 算出，它的键必须与正文实际读到的设置一一对应。
    */
   const usagePromptMounted = new Map()
 
   /**
-   * 把「怎么回 QQ」的说明**注入目标会话自己的系统提示**。
+   * 用法说明的重挂签名：正文依赖的每一个设置项的规范化取值。
+   *
+   * ⚠️ 少一项就是同一类 bug。`buildUsagePrompt()` 现在读两项：
+   * `replyMode`（出站方式的分叉）与 `replyMaxChars`（内嵌在正文里的字数上限）。
+   * 正文里再加设置值时，这里必须同步加一项。
+   */
+  function usagePromptSignature(s = {}) {
+    const mode = normalizeReplyMode(s?.replyMode)
+    const maxChars = usagePromptMaxChars(s)
+    return `${mode}\u0000${maxChars}`
+  }
+
+  /**
+   * 把“怎么回 QQ”的说明**注入目标会话自己的系统提示**。
    *
    * 挂在该 agent 的 ctx 上（而不是插件根 ctx），所以只影响这一个会话，不污染别人。
    * 好处：任何模型/会话一被挂上就立刻知道规矩，不必依赖每条入站消息里的提示。
@@ -684,14 +831,17 @@ export function apply(ctx, config) {
     const scopedCtx = agentCtx ?? ctx
     if (!sp || !agent?.id) return
 
-    const mode = normalizeReplyMode(readSettings().replyMode)
+    const settings = readSettings()
+    const signature = usagePromptSignature(settings)
     const prev = usagePromptMounted.get(agent.id)
-    // 已经挂过、而且出站方式没变 → 不用重挂。
-    if (prev && prev.mode === mode) return
+    // 已经挂过、而且提示词依赖的设置都没变 → 不用重挂。
+    if (prev && prev.signature === signature) return
 
     // ⚠️ 提示词正文是**挂载时算好的快照**（`text` 是字符串，没法动态求值）。
     // 出站方式(replyMode)是开关，改了它必须**重挂**，否则模型会照着一个本部署里
-    // 根本不生效的做法回话（用户 2026-09-30 追问「系统提示词更新了吗」时发现的）。
+    // 根本不生效的做法回话（用户 2026-09-30 追问“系统提示词更新了吗”时发现的）。
+    // 正文里内嵌的出站字数上限(replyMaxChars)同理：不重挂就一直写着旧上限，
+    // 模型写超了会被 `sendToQQ` 按 `too-long` 丢掉，QQ 里既没有消息也看不出原因。
     if (prev) {
       try {
         prev.dispose()
@@ -705,23 +855,26 @@ export function apply(ctx, config) {
         sp.context({
           name: 'qq-bridge',
           order: 500,
-          text: buildUsagePrompt(readSettings()),
+          text: buildUsagePrompt(settings),
         }),
       )
-      usagePromptMounted.set(agent.id, { dispose: typeof dispose === 'function' ? dispose : () => {}, mode })
-      logger.info(`已向会话 ${agent.id} 注入 QQ 用法说明（出站方式=${mode}，scope=${agentCtx ? 'agent' : 'global'}）`)
+      usagePromptMounted.set(agent.id, { dispose: typeof dispose === 'function' ? dispose : () => {}, signature })
+      logger.info(
+        `已向会话 ${agent.id} 注入 QQ 用法说明（出站方式=${normalizeReplyMode(settings.replyMode)}，` +
+          `字数上限=${usagePromptMaxChars(settings)}，scope=${agentCtx ? 'agent' : 'global'}）`,
+      )
     } catch (error) {
       logger.warn(`注入用法说明失败：${error?.message ?? error}`)
     }
   }
 
   /**
-   * 恢复一个**没开着的**会话时，必须把"这个会话原本用的模型"补上。
+   * 恢复一个**没开着的**会话时，必须把“这个会话原本用的模型”补上。
    *
    * ⚠️ 不补会炸（2026-09-30 真机踩到）：
    * `dsh-agent-loop` 是这么注册提示词变量的 ——
    *   `ctx.systemPrompt.variable("model", (context) => context.agent?.options.model)`
-   * 而 `dsh-system-prompt` 的 `interpolate()` 对"变量存在但值是 undefined"是**抛错**的。
+   * 而 `dsh-system-prompt` 的 `interpolate()` 对“变量存在但值是 undefined”是**抛错**的。
    * 于是只要部署里有任何一节含 `{{model}}`（本项目实测是 `deployment.persona-prefix`），
    * 用 `agents.resume({resumeSessionId})` 建出来的 agent（`options.model` 为 undefined）
    * **每一轮都会在组装提示词时失败**。目标会话在 GUI 里开着时不会走这条路，所以以前没暴露。
@@ -799,7 +952,14 @@ export function apply(ctx, config) {
     }
 
     const held = handles.get(id)
-    if (held) return held.agent
+    if (held) {
+      // ⚠️ 走到这里时 `ctx.agents.get(id)` 已经是空 —— 死句柄留下来只会让每次唤醒都投给
+      // 已销毁的 agent，`resume` 永不再执行，台账逐条记 `wake-failed`，事后查不出句柄已死。
+      // 先验活：活着的（句柄记的是别的会话 id 时可能出现）直接用，死的删掉再走 resume。
+      if (isAgentAlive(held.agent)) return held.agent
+      handles.delete(id)
+      logger.warn(`目标会话 ${id} 的旧句柄已失效（agent 不在注册表），改走 resume`)
+    }
 
     // 显式 resume：这是与 dsh-cron 的关键差异 —— 目标会话没开着也能被唤醒。
     // ⚠️ 必须带 agentOptions（模型）—— 否则提示词里的 {{model}} 没值，整轮组装失败。
@@ -834,10 +994,13 @@ export function apply(ctx, config) {
 
   function renderInbound(msg, s) {
     const who = msg.nickname || msg.userName || msg.userId || '未知'
-    const where = msg.groupName ? `${msg.groupName}` : '私聊'
+    // ⚠️ 群聊判据用 `groupId`，**不能**用 `groupName`：`get_group_info` 失败时群名是空的，
+    // 按群名判会把群消息写成“私聊”，模型就当成私聊来回答（群里看着像在自说自话）。
+    // 群名取不到时写“群 <群号>”—— 明确的群聊标记，比空着或“私聊”都有用。
+    const where = msg.groupId ? msg.groupName || `群 ${msg.groupId}` : '私聊'
     // 单条入站也要封顶：有人贴一篇长文过来，不该把上下文整片吃掉。
     const base = `[QQ · ${where}] ${who}：${truncateText(msg.text, MAX_INBOUND_CHARS)}`
-    // 每一轮都只在该轮的入站上写"怎么回"——这是**逐轮**的信号，不靠常驻提示。
+    // 每一轮都只在该轮的入站上写“怎么回”——这是**逐轮**的信号，不靠常驻提示。
     if (s?.replyMode === 'always') return base
     if (s?.replyMode === 'tool') return `${base}\n（回 QQ：用 qq_bridge_send 工具）`
     return `${base}\n（回 QQ 用 [QQ]…[/QQ]）`
@@ -955,12 +1118,16 @@ export function apply(ctx, config) {
         let models = []
         try {
           models = await llm.listModels(p.id)
-        } catch {
+        } catch (error) {
+          // 单个 provider 列举失败**不等于**这个部署没有视觉模型：不能静默吞掉，
+          // 否则用户只看到“没找到支持图片输入的模型”，查不出是哪个 provider 挂了。
+          // 行为不变：继续看下一个 provider。
+          logger.warn(`列举 provider ${p?.id ?? '(未知)'} 的模型失败，跳过该 provider：${error?.message ?? error}`)
           models = []
         }
         const isVision = (m) => Array.isArray(m.inputModalities) && m.inputModalities.includes('image')
         // 偏好顺序：① 名字里带 vision 的（如 deepseek-v4-flash-vision-exp）→ ② 其余支持图片的。
-        // 名字带 vision 的通常是专门的视觉模型，比"顺带支持图片"的主力模型更稳。
+        // 名字带 vision 的通常是专门的视觉模型，比“顺带支持图片”的主力模型更稳。
         const hit = models.find((m) => isVision(m) && /vision/i.test(String(m.id))) ?? models.find(isVision)
         if (hit) {
           const resolved = { provider: hit.provider ?? p.id, model: hit.id }
@@ -979,7 +1146,7 @@ export function apply(ctx, config) {
   /**
    * 用多模态模型描述一张缓存图。
    * 这条路径很关键：目标会话的模型（如 deepseek-v4-flash）**不支持图片输入**，
-   * 插件把图附上去也会被系统剥成 "image omitted"。**描述是它唯一能"知道图里是什么"的途径。**
+   * 插件把图附上去也会被系统剥成 “image omitted”。**描述是它唯一能“知道图里是什么”的途径。**
    *
    * 先查表情包登记表：登记过的图直接返回登记的描述，**一次模型调用都不花**。
    * 这也是登记表的第二个用处 —— 反复出现的图只描述一次。
@@ -1017,7 +1184,7 @@ export function apply(ctx, config) {
       })
       let lastReason = '未知原因'
       // 多模态调用**有几率失败**（网络/限流/偶发空回复），一次失败就不发描述太亏了 ——
-      // 用户报过"识图还是有几率调用失败"。所以：1 次 + 2 次重试，退避 300/600ms。
+      // 用户报过“识图还是有几率调用失败”。所以：1 次 + 2 次重试，退避 300/600ms。
       for (let attempt = 1; attempt <= VISION_ATTEMPTS; attempt++) {
         try {
           let out = ''
@@ -1053,7 +1220,7 @@ export function apply(ctx, config) {
   }
 
   // 图片本地缓存目录：**收到图片就落盘**（纯 I/O，不调用模型），唤醒时直接读文件。
-  // 这样既保住了缓冲"零模型调用"的性质，又不怕 QQ 的图片 URL 过期。
+  // 这样既保住了缓冲“零模型调用”的性质，又不怕 QQ 的图片 URL 过期。
   const imageCacheDir = join(home, 'qq-bridge-images')
 
   function listImageCache() {
@@ -1154,7 +1321,7 @@ export function apply(ctx, config) {
     return { blocks, failures }
   }
 
-  /** 记住「这条消息是谁从哪儿发的」，出站回复用它当目的地。 */
+  /** 记住“这条消息是谁从哪儿发的”，出站回复用它当目的地。 */
   function rememberDestination(msg) {
     if (msg.groupId) state.lastDestination = { kind: 'group', groupId: String(msg.groupId) }
     else if (msg.userId) state.lastDestination = { kind: 'private', userId: String(msg.userId) }
@@ -1174,7 +1341,7 @@ export function apply(ctx, config) {
     // 保留引用：唤醒失败时把这一条就地改成 `wake-failed`。修之前失败也写着 `wake`，事后查不出问题。
     const inboundLog = pushLog({ kind: 'inbound', decision: d.action, reason: d.reason, who: msg.userId, group: msg.groupId ?? null, text: String(msg.text ?? '').slice(0, 200) })
 
-    // 目的地无论是否唤醒都要记：这样「只记录」期间的闲聊之后也能被回复到。
+    // 目的地无论是否唤醒都要记：这样“只记录”期间的闲聊之后也能被回复到。
     if (d.action !== 'drop') rememberDestination(msg)
 
     if (d.action === 'drop') return { ...d, delivered: false }
@@ -1182,15 +1349,23 @@ export function apply(ctx, config) {
     // ⚠️ **在任何 await 之前**快照缓冲。
     // 唤醒路径后面要下载图片、还要调多模态模型写描述（好几秒），
     // 这期间新到的消息会继续进缓冲 —— 结束时如果一把 `buffer = []`，
-    // 就会把它们一起吞掉（真机上出现过"发三张图只处理了一张"）。
+    // 就会把它们一起吞掉（真机上出现过“发三张图只处理了一张”）。
     const bufferSnapshot = state.buffer.slice()
 
     // 图片：非丢弃的消息就把图**落盘缓存**（纯 I/O，不调用模型）。
-    // 唤醒时直接读文件 —— 既保住缓冲"零模型调用"的性质，也不怕 QQ 的图片 URL 过期。
+    // 唤醒时直接读文件 —— 既保住缓冲“零模型调用”的性质，也不怕 QQ 的图片 URL 过期。
+    //
+    // ⚠️ 两个数组的分工不能混：
+    //   `cachedImages` 只装**落盘成功**的图（缓冲、附件、描述用它）；
+    //   `inlineSlots` 与正文里的 `[图片]` 占位符**逐位对齐**，落盘失败的位留 `null`。
+    // 早先只传 `cachedImages`：第 1 张落盘失败时，第 2 张的描述与短哈希会落到第 1 个
+    // 占位符上，模型把描述归给错的图。
     const cachedImages = []
+    const inlineSlots = []
     if (Array.isArray(msg.images)) {
       for (const item of msg.images.slice(0, MAX_BUFFER_IMAGES_PER_ITEM)) {
         const cached = await cacheImage(item)
+        inlineSlots.push(cached ?? null)
         if (cached) cachedImages.push(cached)
       }
     }
@@ -1241,12 +1416,12 @@ export function apply(ctx, config) {
     const digest = renderDigest(s, bufferSnapshot)
     // 图片：缓冲里攒下的 + 本条消息的，一起下载成真正的附件。
 
-    // 失败就只留 [图片] 占位符，但把**失败原因**附在正文里 —— 否则"看不见图"对模型完全不可观测。
+    // 失败就只留 [图片] 占位符，但把**失败原因**附在正文里 —— 否则“看不见图”对模型完全不可观测。
     const allImages = [...digest.images, ...cachedImages]
     const { blocks: imageBlocks, failures } = await loadImageBlocks(allImages)
-    // 目标模型多半看不了图（deepseek-v4-flash 就是纯文本，附件会被系统剥成 "image omitted"）
+    // 目标模型多半看不了图（deepseek-v4-flash 就是纯文本，附件会被系统剥成 “image omitted”）
     // —— 所以先用多模态模型把图读成一句描述，然后**就地填回 [图片] 占位符**。
-    // （描述另起一段附在末尾是错的：模型会读成"这张图没解析出来、后面又来了一张"。）
+    // （描述另起一段附在末尾是错的：模型会读成“这张图没解析出来、后面又来了一张”。）
     // 占位符里同时带上短哈希，模型才能指着一张具体的图去 save / send 表情包。
     const noteById = new Map()
     for (const img of allImages.slice(0, MAX_DESCRIBE_PER_WAKE)) {
@@ -1256,7 +1431,7 @@ export function apply(ctx, config) {
 
     let text =
       inlineImageNotes(digest.text, digest.images, noteById) +
-      inlineImageNotes(renderInbound(msg, s), cachedImages, noteById)
+      inlineImageNotes(renderInbound(msg, s), inlineSlots, noteById)
     if (failures.length > 0) text += `\n（有 ${failures.length} 张图片没能取到，原因：${failures[0]}）`
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
@@ -1266,14 +1441,14 @@ export function apply(ctx, config) {
     // 投递方式（`delivery` 设置）——宿主 loop 的 Agent 有三个现成通道：
     //   followup: 排一轮自己的 turn（旧行为，最durable）
     //   steer   : **插话** —— 空闲时直接起一轮，正在跑就在下一个 step 边界塞进去
-    //   inject  : 只进上下文、不唤醒（这里不用）
+    //   inject  : 只进上下文、不唤醒（入站投递不用它；出站被拒的回注用它，见 notifyDropToSession）
     // 'auto'（默认）：**正在跑就插话**（QQ 聊天的直觉就是要能打断），空闲时照常排队。
     // `agent.status` 是宿主的权威状态（'idle' | 'running'）；取不到就退回 followup。
     const running = agent?.status === 'running'
     const wantSteer = s.delivery === 'steer' || (s.delivery !== 'followup' && running)
 
     // ⚠️⚠️ **必须在 send() 之前置位**。`followup()` 会**同步**启动这一轮 ——
-    // `turn/start` 当场就到达，而它会快照 pending/claim。晚一步置位 = "标还没立、轮已经开了"，
+    // `turn/start` 当场就到达，而它会快照 pending/claim。晚一步置位 = “标还没立、轮已经开了”，
     // 整轮哑火。（2026-09-30 真机抓到的时序：gate = { pending: true, current: false,
     // turnActive: true, claimed: false } —— pending 对、current 错，就是置位晚了一拍的指纹。）
     // 置位之前快照这三面闸门标志：投递失败时按它回滚（见上面的 failWake）。
@@ -1336,7 +1511,7 @@ export function apply(ctx, config) {
 
   /**
    * 解析 access_token。
-   * 凭据契约要求「每次操作重新解析、不得缓存」，所以这里每次建连都重取，
+   * 凭据契约要求“每次操作重新解析、不得缓存”，所以这里每次建连都重取，
    * 于是轮换 token 不需要重启进程。
    */
   async function resolveAccessToken() {
@@ -1391,10 +1566,10 @@ export function apply(ctx, config) {
 
     const inbound = mapOneBotMessage(event, selfId)
     if (!inbound) return
-    // ⚠️ **绝不能因为"文本为空"就丢掉整条消息。**
-    // 只 @ 一下（不带文字）是最自然的"叫你一声"，纯表情包/纯图片同理 ——
+    // ⚠️ **绝不能因为“文本为空”就丢掉整条消息。**
+    // 只 @ 一下（不带文字）是最自然的“叫你一声”，纯表情包/纯图片同理 ——
     // 它们都必须进 decide()。只有**什么都没带**（无文字、没 @ 我、没图片）才忽略。
-    // 真机上踩过：用户发「@244」时 text 是空串/空格，结果被静默丢弃、@ 了也不唤醒。
+    // 真机上踩过：用户发“@244”时 text 是空串/空格，结果被静默丢弃、@ 了也不唤醒。
     const hasImages = Array.isArray(inbound.images) && inbound.images.length > 0
     if (inbound.text.trim() === '' && inbound.atSelf !== true && !hasImages) return
 
@@ -1455,10 +1630,13 @@ export function apply(ctx, config) {
           else if (data.qq) parts.push(`@${data.qq} `)
           continue
         }
-        // 图片：除了占位符，还把 URL 收起来，之后下载成真正的附件给目标会话看
+        // 图片：除了占位符，还把 URL 收起来，之后下载成真正的附件给目标会话看。
+        // 拿不到 URL 的图片段也占一个位置（写 `null`）：占位符与图片必须逐位对齐，
+        // 否则后面的图会顶到前面那个占位符上（见 handleInbound 的 `inlineSlots`）。
         if (type === 'image') {
           const url = data.url || data.file || ''
           if (url) images.push({ url: String(url), name: data.file ? String(data.file).split(/[\\/]/).pop() : undefined })
+          else images.push(null)
         }
         // 其余段都给个占位符：表情包、语音、视频、文件、卡片……都不能让消息凭空消失。
         const label = labelForSegment(type, data)
@@ -1469,7 +1647,8 @@ export function apply(ctx, config) {
       const raw = String(event.raw_message ?? message ?? '')
       // string 形态下 @ 是 CQ 码；顺便把常见 CQ 码换成可读占位符。
       if (selfId !== '' && new RegExp(`\\[CQ:at,qq=${selfId}(?:,[^\\]]*)?\\]`).test(raw)) atSelf = true
-      // 从 CQ 码里抠图片 URL（url= 优先，退 file=）
+      // 从 CQ 码里抠图片 URL（url= 优先，退 file=）。
+      // 抠不到 URL 的 CQ 图片同样占一个位置（`null`），保住占位符与图片的逐位对齐。
       for (const m of raw.matchAll(/\[CQ:image,([^\]]*)\]/g)) {
         const kv = Object.fromEntries(
           m[1].split(',').map((p) => {
@@ -1479,6 +1658,7 @@ export function apply(ctx, config) {
         )
         const url = kv.url || kv.file || ''
         if (url) images.push({ url, name: kv.file ? kv.file.split(/[\\/]/).pop() : undefined })
+        else images.push(null)
       }
       text = raw
         .replace(/\[CQ:at,qq=([^,\]]+)(?:,[^\]]*)?\]/g, (_m, qq) => (selfId !== '' && String(qq) === selfId ? '' : `@${qq} `))
@@ -1528,7 +1708,7 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 出站：把目标会话的回复发给「最后一次入站的目的地」。
+   * 出站：把目标会话的回复发给“最后一次入站的目的地”。
    * M2 之前这里只是打日志的桩。
    *
    * 超长文本**一条都不发**：QQ 不该发长消息，所以只把拒绝结果回给调用方
@@ -1578,7 +1758,7 @@ export function apply(ctx, config) {
     return () => transport.dispose()
   })
 
-  // 只有「地址 / token 引用」变了才重连；改昵称、唤醒概率之类不该把连接掐了。
+  // 只有“地址 / token 引用”变了才重连；改昵称、唤醒概率之类不该把连接掐了。
   let lastTransportKey = `${readSettings().onebotUrl}\u0000${readSettings().accessTokenEnv}`
 
   /** 设置变了之后的副作用：用法说明重挂 + 传输重连。老模型的 settings 事件与本机接口共用。 */
@@ -1591,13 +1771,18 @@ export function apply(ctx, config) {
     // 成功的解析照旧按签名缓存，设置没变就不重复枚举模型列表。
     if (visionModelCache.model === null) visionModelCache = { signature: null, model: null }
 
-    // 出站方式是**开关**，而系统提示词正文是**挂载那一刻的快照** —— 改了它必须重挂，
-    // 否则模型会照着一个在本部署里根本不生效的做法回话（用户追问「系统提示词更新了吗」时发现的）。
+    // 用法说明的正文是**挂载那一刻的快照**，而它依赖若干设置值（出站方式、出站字数上限）
+    // —— 签名变了就必须重挂。只比 `replyMode` 会漏掉字数上限：改了上限却不重挂，
+    // 常驻提示仍写着旧上限，模型写超了会被 `sendToQQ` 按 `too-long` 丢掉。
+    // 签名只含正文真正读到的项，所以改昵称之类**不会**白重挂一次。
     const live = s.targetSessionId ? ctx.agents.get(s.targetSessionId) : undefined
     if (live) {
       const mounted = usagePromptMounted.get(live.id)
-      if (mounted && mounted.mode !== s.replyMode) {
-        logger.info(`出站方式 ${mounted.mode} → ${s.replyMode}，重挂用法说明`)
+      const signature = usagePromptSignature(s)
+      if (mounted && mounted.signature !== signature) {
+        logger.info(
+          `用法说明依赖的设置变了（${mounted.signature.split('\u0000').join(' / ')} → ${signature.split('\u0000').join(' / ')}），重挂`,
+        )
         mountUsagePrompt(live)
       }
     }
@@ -1619,7 +1804,7 @@ export function apply(ctx, config) {
   // 0.2.0：宿主设置桥写不了 → 自己挂一条**只服务本机**的设置接口（范本：皮肤中心的 /api/skin-center/...）。
   // 可选注入：没有 webServer 服务的部署照常工作（只是卡片仍拿不到可写域）。
   // ⚠️ **只在非老模型（0.2.0 那类）宿主上挂**：老模型（0.1.5）读的是 settings 命名空间、不读这个文件，
-  // 挂上去只会是个"改了不生效"的死接口。（`ctx.inject` 是 Cordis 核心 API，真实宿主一定有，
+  // 挂上去只会是个“改了不生效”的死接口。（`ctx.inject` 是 Cordis 核心 API，真实宿主一定有，
   // 容错只是为了让不带它的极简测试桩也能跑。）
   if (!legacySettings && typeof ctx.inject === 'function') ctx.inject(['webServer'], (scoped) => {
     const server = scoped?.webServer
@@ -1649,17 +1834,17 @@ export function apply(ctx, config) {
   let pendingReply = null
 
   /**
-   * 「这一轮是不是 QQ 唤醒的」——**按轮快照**，三个变量分工。
+   * “这一轮是不是 QQ 唤醒的”——**按轮快照**，三个变量分工。
    *
    * **为什么必须有它**：注入的用法说明是**常驻**系统提示 —— 会话发起人在 DSH 界面里
-   * 跟同一个会话聊天时，模型同样看得到「你连着 QQ，回话用标记块」。出站若不看来源，
-   * DSH 那一轮里的标记块也会被发进群（用户 2026-09-30 报的「agent 分不清是在 QQ 还是 DSH 里」）。
+   * 跟同一个会话聊天时，模型同样看得到“你连着 QQ，回话用标记块”。出站若不看来源，
+   * DSH 那一轮里的标记块也会被发进群（用户 2026-09-30 报的“agent 分不清是在 QQ 还是 DSH 里”）。
    *
    * ⚠️ **为什么不是一个标**（复查时发现的两个真口子）：
    *   - 口子 ①：一轮还在跑时，DSH 里又打了一句 → 单一标被清 → **同一轮里工具被拒（哑火）**；
    *   - 口子 ②：DSH 那一轮还在跑时，群里来了 QQ 消息 → 单一标被抬 → **DSH 的内容可能发进群**。
-   *   根因：`turn/start` 的事件负载只有 `{turn}`，**没有"这轮是哪条消息触发的"**，
-   *   所以"中途被改"就无从区分。修法：把"最近一条用户消息的来源"和"当前轮的来源"分开存。
+   *   根因：`turn/start` 的事件负载只有 `{turn}`，**没有“这轮是哪条消息触发的”**，
+   *   所以“中途被改”就无从区分。修法：把“最近一条用户消息的来源”和“当前轮的来源”分开存。
    *
    * 三个变量：
    *   - `pendingFromQQ`  最近一条 `user/message` 的来源判断（随时更新，**不影响正在跑的轮**）
@@ -1669,10 +1854,10 @@ export function apply(ctx, config) {
   let pendingFromQQ = false
   let currentTurnFromQQ = false
   let turnActive = false
-  /** 注入时对"下一轮"的直接认领（只可能由我们自己的注入置位，比 pending 权威）。 */
+  /** 注入时对“下一轮”的直接认领（只可能由我们自己的注入置位，比 pending 权威）。 */
   let claimedFromQQ = false
   /**
-   * 「非 QQ 轮二次确认」状态：本轮已经回过一次"确认要发吗"。
+   * “非 QQ 轮二次确认”状态：本轮已经回过一次“确认要发吗”。
    * `turn/start` 与 `turn/end` 都清零，所以它严格属于**某一轮**，绝不会跨轮生效。
    * 用户 2026-10-01 提议：工具模式下不是 QQ 发起的，第一次调用只回问一句，
    * 同一轮里**再调一次**才真的发 —— 能力不丢，误发依然要跨过一道有意识的动作。
@@ -1680,16 +1865,25 @@ export function apply(ctx, config) {
   let nonQQConfirmPending = false
 
   /**
-   * 最近一次注入的 QQ 消息 id —— 用来**认出**「这条 user/message 就是我们自己灌进去的」。
+   * 最近一次注入的 QQ 消息 id —— 用来**认出**“这条 user/message 就是我们自己灌进去的”。
    *
    * ⚠️ 为什么不能只看 `source.kind`：真机上出现过哑火 —— 用户明明是用 QQ @ 的，
-   * 工具却报「本轮不是 QQ 唤醒的」。也就是说，那条注入消息在事件里**没有被认成我们的**
+   * 工具却报“本轮不是 QQ 唤醒的”。也就是说，那条注入消息在事件里**没有被认成我们的**
    * （source 被重写 / id 被换 / 事件顺序不对，任一都可能）。所以判据要放宽成三条并用：
    *   ① 消息 id 等于我们刚注入的那条；② 正文以 QQ 入站前缀开头；③ 才是 source。
-   * 放宽带来的唯一风险是"DSH 里有人手打一段以 `[QQ · ` 开头的话"——那也不吃亏：
+   * 放宽带来的唯一风险是“DSH 里有人手打一段以 `[QQ · ` 开头的话”——那也不吃亏：
    * 它本来就长得像 QQ 消息。
    */
   let lastInjectedMessageId = null
+
+  /**
+   * 最近一条“出站被拒”回注消息的 id。
+   *
+   * 回注用 `agent.inject()`，它同样产生一条 `user/message`。若不单独认出来，
+   * 闸门会把它当成一次 QQ 入站并把 `pendingFromQQ` 抬成 `true`，
+   * 于是**下一轮**可能被误判成“QQ 唤醒的那一轮”。
+   */
+  let lastDropNoticeId = null
 
   /** 判断一条 user/message 是不是我们自己（qq-bridge）灌进去的 QQ 入站消息。 */
   function isOurInbound(msg) {
@@ -1719,15 +1913,15 @@ export function apply(ctx, config) {
     if (!targetId || session?.id !== targetId) return
     const data = event?.data ?? {}
 
-    // 一轮开始：把"当前轮来源"定下来。
+    // 一轮开始：把“当前轮来源”定下来。
     // 之后中途再来什么消息，都不会改这一轮的判定（这就是两个口子的解药）。
     if (event.type === 'turn/start') {
       turnActive = true
-      // 注入时的"认领"优先：`claimedFromQQ` **只可能**由我们自己的注入置位，比 pending 更权威。
+      // 注入时的“认领”优先：`claimedFromQQ` **只可能**由我们自己的注入置位，比 pending 更权威。
       //（早先这里无条件取 pending —— 一旦 pending 被同轮里的别的消息污染（harness 上下文）就哑火。）
       currentTurnFromQQ = claimedFromQQ || pendingFromQQ
       claimedFromQQ = false
-      // 新一轮：非 QQ 轮的"二次确认"清零（否则上一轮的确认会跨轮生效）。
+      // 新一轮：非 QQ 轮的“二次确认”清零（否则上一轮的确认会跨轮生效）。
       nonQQConfirmPending = false
       return
     }
@@ -1739,11 +1933,16 @@ export function apply(ctx, config) {
       const kind = typeof source.kind === 'string' ? source.kind : 'unknown'
       const plugin = typeof source.plugin === 'string' ? source.plugin : ''
       const mine = isOurInbound(msg)
+      // 出站被拒的回注不是一次 QQ 入站：认出来就完全不碰闸门。
+      if (lastDropNoticeId && msg?.id === lastDropNoticeId) {
+        noteInboundProbe(msg, kind, plugin, false, '忽略（出站被拒的回注，不是触发器）')
+        return
+      }
       // 只更新 pending：**绝不改正在跑的那一轮**的判定。
       let effect = 'pending 不变'
-      // ⚠️ 两个条件都要：`mine` 是"认出来了"（消息 id / 正文前缀），`plugin === PLUGIN_TAG`
-      // 是"来源字段还老实"时的兜底。**少任何一个都会哑火** —— 写这段时我先把后者删了，
-      // 测试立刻挂了 8 条（真实链路里前缀一定匹配，但别把正确性押在"一定"上）。
+      // ⚠️ 两个条件都要：`mine` 是“认出来了”（消息 id / 正文前缀），`plugin === PLUGIN_TAG`
+      // 是“来源字段还老实”时的兜底。**少任何一个都会哑火** —— 写这段时我先把后者删了，
+      // 测试立刻挂了 8 条（真实链路里前缀一定匹配，但别把正确性押在“一定”上）。
       if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG) || kind === `plugin:${PACKAGE}`) {
         pendingFromQQ = true
         effect = 'pending=true（我们自己注入的 QQ 消息）'
@@ -1752,8 +1951,8 @@ export function apply(ctx, config) {
         effect = 'pending=false（人在 DSH 里打字）'
       } else if (kind === 'plugin' && plugin.startsWith('@deepseek-ai/')) {
         // ⚠️ **harness 自己注入的上下文也走 user/message + plugin 来源** —— 每轮开头那段
-        // "Current runtime context…" 就是 `@deepseek-ai/dsh-system-prompt` 发的。
-        // 它**不是一轮的触发器**，只是这一轮的内容。早先把它当成"别的插件起的轮" → pending=false，
+        // “Current runtime context…” 就是 `@deepseek-ai/dsh-system-prompt` 发的。
+        // 它**不是一轮的触发器**，只是这一轮的内容。早先把它当成“别的插件起的轮” → pending=false，
         // 紧接着 turn/start 就快照到 false → 工具拒绝（真机哑火第 3 次，2026-09-30）。
         // 判据：harness 自家的插件包名都带 `@deepseek-ai/` 前缀。
         effect = '忽略（harness 注入的上下文，不是触发器）'
@@ -1769,7 +1968,7 @@ export function apply(ctx, config) {
 
     if (event.type === 'assistant/message') {
       // ⚠️ surfaceOp 是事件对象的**顶层**字段（与 type/seq/time/data 同级），不在 data 里。
-      // 它是 {op:'replace', startSeq, endSeq} 时表示这条是「替换」而非「追加」，
+      // 它是 {op:'replace', startSeq, endSeq} 时表示这条是“替换”而非“追加”，
       // 继续累加会重复，所以直接重算为当前这条。
       const text = messageText(data.message)
       if (!text) return
@@ -1810,18 +2009,36 @@ export function apply(ctx, config) {
         return
       }
 
-      // 只有真正发出去的消息才落台账。
-      // 被拒绝的（含超长）不记，否则台账里会多出一条 QQ 里根本没有的消息。
+      // 只有真正发出去的消息才落 outbox 台账。
+      // 被拒绝的（含超长）不落 outbox，否则台账里会多出一条 QQ 里根本没有的消息。
+      // 被拒的结果记进独立的丢弃台账。
+      const via = s.replyMode === 'always' ? 'always' : 'marker'
       sendToQQ(text)
         .then((result) => {
           if (result?.dropped) {
             const detail = result.reason === 'too-long' ? `（${result.length} 字 > 上限 ${result.limit} 字）` : ''
             logger.warn(`标记块未发出：reason=${result.reason}${detail}`)
+            // 被拒的出站**不写 outbox**（那是假账），改记独立的丢弃台账。
+            recordDropped({
+              via,
+              reason: result.reason,
+              limit: result.limit ?? null,
+              length: result.length ?? null,
+              destination: state.lastDestination,
+              sessionId: session.id,
+            })
+            // 回注会话：标记块模式下模型收不到任何反馈，会以为已经回复了。
+            notifyDropToSession(session.id, {
+              via,
+              reason: result.reason,
+              limit: result.limit ?? null,
+              length: result.length ?? null,
+            })
             return
           }
           recordOutbox({
             sessionId: session.id,
-            via: s.replyMode === 'always' ? 'always' : 'marker',
+            via,
             endReason: kind,
             text,
           })
@@ -1831,19 +2048,82 @@ export function apply(ctx, config) {
   }))
 
   /**
-   * 记一条「真的发到 QQ 了」的台账。
+   * 记一条“真的发到 QQ 了”的台账。
    *
    * 为什么要记：出站有 2 条路 —— ① 每轮结束时的标记块闸门，② `qq_bridge_send` 工具（刻意绕过闸门）。
-   * 只记第 1 条的话，「群里冒出消息了，是漏了还是有人故意发的？」就答不上来。
+   * 只记第 1 条的话，“群里冒出消息了，是漏了还是有人故意发的？”就答不上来。
    * 所以 2 条路都落进同一个 outbox，并用 `via` 标出来源（marker / always / tool）。
    *
-   * 被拒绝的发送（`dropped: true`）不落台账，只写 warn 日志。
-   * 台账与 QQ 里的实际消息一一对应，事后不会对不上账。
+   * 被拒绝的发送（`dropped: true`）不落这里 —— 台账与 QQ 里的实际消息一一对应，
+   * 事后不会对不上账。被拒的结果记进 `state.dropped`（见 recordDropped）。
    */
   function recordOutbox(entry) {
     state.outbox.push({ at: Date.now(), ...entry, text: String(entry.text ?? '').slice(0, 4000) })
     if (state.outbox.length > MAX_OUTBOX) state.outbox = state.outbox.slice(-MAX_OUTBOX)
     saveState()
+  }
+
+  /**
+   * 记一条“出站被拒”的丢弃台账（内存 + 落盘，环形上限 `MAX_DROPPED`）。
+   *
+   * 为什么要有它：`qq_bridge_send` 工具把 `reason` 直接回给模型，标记块那条路没有回执 ——
+   * 两条路行为不一致，标记块模式下模型以为已经回复了。丢弃台账是标记块那条路的独立记录。
+   * 字段：`at` / `via`（marker ｜ always）/ `reason` / `limit` / `length` / 目的地 / `sessionId`。
+   *
+   * 只记 `dropped: true` 的结果；成功出站一律进 outbox。
+   */
+  function recordDropped(entry) {
+    state.dropped.push({
+      at: Date.now(),
+      via: String(entry.via ?? 'marker'),
+      reason: String(entry.reason ?? 'unknown'),
+      limit: entry.limit ?? null,
+      length: entry.length ?? null,
+      destination: entry.destination ?? null,
+      sessionId: entry.sessionId ?? null,
+    })
+    if (state.dropped.length > MAX_DROPPED) state.dropped = state.dropped.slice(-MAX_DROPPED)
+    saveState()
+  }
+
+  /** 出站被拒原因 → 给模型看的中文说明。 */
+  function dropReasonText(reason) {
+    if (reason === 'too-long') return 'too-long（正文超过出站字数上限，一条都没有发出）'
+    if (reason === 'not-connected') return 'not-connected（OneBot 传输未连接）'
+    if (reason === 'no-destination') return 'no-destination（没有已知的发送目的地）'
+    if (reason === 'empty') return 'empty（去完 Markdown 后正文为空）'
+    return String(reason)
+  }
+
+  /**
+   * 出站被拒时把原因**回注目标会话的上下文**。
+   *
+   * 用 `agent.inject()`：契约是“Queue model-facing context for the next pre-step without waking
+   * the driver” —— 只进上下文、不唤醒。**不得**改用 `followup()` / `steer()`：那会新起一轮，
+   * 模型可能再写一条同样超长的消息，形成循环。
+   * 注入通道拿不到时只写日志并返回 `false`，不抛错。
+   *
+   * 注入的消息用 `makeMessage()` 的 source；为免它被当成一次 QQ 入站而污染出站闸门，
+   * `user/message` 分支用 `lastDropNoticeId` 单独认它。
+   */
+  function notifyDropToSession(sessionId, info) {
+    const text =
+      `[QQ 出站被拒] 本条（${info.via}）未发到 QQ。原因：${dropReasonText(info.reason)}。` +
+      (info.reason === 'too-long' ? `实际 ${info.length} 字，上限 ${info.limit} 字。缩短后可重发。` : '')
+    const agent = sessionId && typeof ctx.agents?.get === 'function' ? ctx.agents.get(sessionId) : undefined
+    if (!agent || typeof agent.inject !== 'function') {
+      logger.warn(`丢弃原因未能回注会话 ${sessionId || '(未知)'}（没有可用的 inject 通道）：${text}`)
+      return false
+    }
+    try {
+      const notice = makeMessage(text)
+      agent.inject(notice)
+      lastDropNoticeId = notice?.id ?? null
+      return true
+    } catch (error) {
+      logger.warn(`丢弃原因回注失败（${error?.message ?? error}）：${text}`)
+      return false
+    }
   }
 
   function messageText(message) {
@@ -1862,7 +2142,7 @@ export function apply(ctx, config) {
    *
    * `clientModules` 由 dsh-client-modules 提供，只在 web 部署里存在：
    * 它在**启动时**扫描启用的 loader 条目，把带 `dsh.client` 的包组合成 boot graph。
-   * 所以「改了 package.json 但没重启」在这里一眼就能看出来 —— 那是卡片不显示最常见的原因。
+   * 所以“改了 package.json 但没重启”在这里一眼就能看出来 —— 那是卡片不显示最常见的原因。
    */
   function clientHalfStatus() {
     const cm = ctx.get('clientModules')
@@ -1891,7 +2171,7 @@ export function apply(ctx, config) {
   if (config.debugTools) {
     ctx.tools.register(defineTool({
       name: 'qq_bridge_status',
-      description: '查看 qq-bridge 状态：设置、目标会话是否已加载、OneBot 连接状态、最近唤醒日志与待发文本。',
+      description: '查看 qq-bridge 状态：设置、目标会话是否已加载、OneBot 连接状态、最近唤醒日志、待发文本与出站丢弃台账。',
       parameters: {},
       output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
       async execute() {
@@ -1913,9 +2193,12 @@ export function apply(ctx, config) {
           })),
           recentLog: state.log.slice(-15),
           recentOutbox: state.outbox.slice(-3),
+          // 出站被拒的独立台账（与 recentOutbox 并列）：标记块那条路没有回执，
+          // 事后排查“这条到底发没发出去”只能看这里。
+          recentDropped: state.dropped.slice(-3),
           // 排障用：最近观测到的 user/message 长什么样（哑火时看这里 —— ours=false 就说明没认出来）
           recentInboundSources: inboundProbe.slice(-5),
-          // 出站闸门的实时状态：currentTurnFromQQ 才是决定"这一轮发不发"的那个
+          // 出站闸门的实时状态：currentTurnFromQQ 才是决定“这一轮发不发”的那个
           gate: { pendingFromQQ, currentTurnFromQQ, turnActive, claimedFromQQ },
           // M3：浏览器半有没有被 web 宿主组合进 boot graph。
           // 界面里看不到卡片时先看这里 —— 最常见的原因是改了 package.json 没重启。
@@ -1984,13 +2267,13 @@ export function apply(ctx, config) {
   //
   // 不受 debugTools 限制 —— 选了 'tool' 模式，它就是回复群里的唯一方式，不是调试工具。
   // 两道保险：
-  //   ① **来源闸门**：只有「被 QQ 唤醒的那一轮」才发得出去。在 DSH 界面里直接对话时调用会被
-  //      拒绝，并把原因回给模型 —— 这正是标记块模式缺的那个反馈回路（用户报的"分不清在哪"）；
+  //   ① **来源闸门**：只有“被 QQ 唤醒的那一轮”才发得出去。在 DSH 界面里直接对话时调用会被
+  //      拒绝，并把原因回给模型 —— 这正是标记块模式缺的那个反馈回路（用户报的“分不清在哪”）；
   //   ② 每次成功发送都落 outbox（via: 'tool'），事后能从 status 查到。
   //      没发出去的（被闸门拒绝、超长）不落台账。
   // `qq_bridge_send` 与 `qq_bridge_sticker` 共用这一道闸门：
   //   ① 被 QQ 唤醒的那一轮 → 放行（返回 null）；
-  //   ② 不是 QQ 唤醒的那一轮 → 第一次调用只回一句"确认要发吗"（**一个字都不发**），
+  //   ② 不是 QQ 唤醒的那一轮 → 第一次调用只回一句“确认要发吗”（**一个字都不发**），
   //      同一轮里再调一次才真的发。`nonQQConfirmPending` 按轮清零，不跨轮泄漏。
   // 返回**字符串**时调用方必须原样 return 它；返回 null = 放行。
   function outboundGate(action) {
@@ -2026,9 +2309,9 @@ export function apply(ctx, config) {
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
     async execute(args) {
       // 来源闸门（2026-10-01 起是**二次确认**，不再是硬拒绝）：
-      // 不是 QQ 唤醒的那一轮，第一次调用只回一句"确认要发吗"、**一个字都不发**；
+      // 不是 QQ 唤醒的那一轮，第一次调用只回一句“确认要发吗”、**一个字都不发**；
       // 同一轮里再调一次才真的发出去。DSH 侧依然不会误发（多跨一道有意识的动作），
-      // 但同时保住了"我确实想让你发到 QQ"这条能力 —— 以前是彻底发不出去。
+      // 但同时保住了“我确实想让你发到 QQ”这条能力 —— 以前是彻底发不出去。
       const blocked = outboundGate('qq_bridge_send')
       if (blocked !== null) return blocked
       const dest = args.groupId
@@ -2502,7 +2785,7 @@ export function apply(ctx, config) {
 
   // ── 卡片上的三个操作按钮（打开 WebUI / 启动 NapCat / 打开文件夹）─────────────
   //
-  // ⚠️ 这三条路由**不受 legacySettings 门控**：它们只管启动与打开，跟"设置值存在哪"无关，
+  // ⚠️ 这三条路由**不受 legacySettings 门控**：它们只管启动与打开，跟“设置值存在哪”无关，
   //    两代宿主都要挂。仍然只服务本机 —— 它们能启动进程、能开文件管理器。
 
   /**
@@ -2521,7 +2804,7 @@ export function apply(ctx, config) {
       const parsed = JSON.parse(readFileSync(join(configDir, 'webui.json'), 'utf8'))
       cfg = parsed && typeof parsed === 'object' ? parsed : undefined
     } catch {
-      // 文件不存在或不是 JSON 都当"没读到" —— 卡片上会显示"没读到 webui.json"。
+      // 文件不存在或不是 JSON 都当“没读到” —— 卡片上会显示“没读到 webui.json”。
       cfg = undefined
     }
     const host = String(cfg?.host || '127.0.0.1')
@@ -2553,17 +2836,19 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 一个按钮 = 一条 exact 路由。统一在这里做两件事：只服务本机；动作失败也只回 JSON。
-   * 动作失败用 200 + `{ ok: false, error }` —— 请求本身成功了，是动作没成。
+   * 一个按钮 = 一条 exact 路由。统一在这里做三件事：准入判定（对端地址 + 来源 +
+   * POST 的 content-type）；动作失败也只回 JSON。动作失败用 200 + `{ ok: false, error }`
+   * —— 请求本身成功了，是动作没成。
    */
   function napcatRoute(method, run) {
     return async (req, res) => {
-      if (!isLoopback(req)) {
-        logger.warn(`napcat 接口拒绝了非本机请求（${req?.socket?.remoteAddress ?? '?'}）`)
-        return sendJson(res, 403, { ok: false, error: 'loopback-only' })
-      }
+      // 与设置接口共用同一道闸门：这里能启动进程、能打开文件管理器，任何一条路由都不许绕过。
+      if (rejectLocalRequest(req, res)) return
       if (String(req.method ?? '').toUpperCase() !== method) {
-        return sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
+        return sendJson(res, 405, {
+          ok: false,
+          error: `这个接口只接受 ${method} 请求（当前是 ${String(req.method ?? '?')}）。`,
+        })
       }
       try {
         return sendJson(res, 200, await run())
@@ -2629,7 +2914,7 @@ export function apply(ctx, config) {
     }
   })
 
-  // 这个工具**不受 debugTools 开关限制**：它是本插件的"一键"入口，不是调试工具。
+  // 这个工具**不受 debugTools 开关限制**：它是本插件的“一键”入口，不是调试工具。
   ctx.tools.register(defineTool({
     name: 'qq_bridge_napcat',
     description:
@@ -2667,7 +2952,7 @@ export function apply(ctx, config) {
     },
   }))
 
-  // ── 会话跟随：模型自己决定「下一轮要不要必然触发」 ──────────────────────────
+  // ── 会话跟随：模型自己决定“下一轮要不要必然触发” ──────────────────────────
   // 不受 debugTools 限制 —— 这是产品的使用方式，不是调试工具。
   const DEFAULT_LISTEN_MINUTES = 5
   const MAX_LISTEN_MINUTES = 60
@@ -2727,13 +3012,22 @@ function clamp01(n) {
 }
 
 /**
+ * 用法说明正文里内嵌的出站字数上限：`replyMaxChars` 取不到时回落到 1500。
+ * `buildUsagePrompt()` 与重挂签名 `usagePromptSignature()` 共用这一条规则 ——
+ * 两处各算一遍，改了一处就会漏掉另一处。
+ */
+function usagePromptMaxChars(s = {}) {
+  return Number.isFinite(s?.replyMaxChars) && s.replyMaxChars > 0 ? s.replyMaxChars : 1500
+}
+
+/**
  * 注入目标会话的用法说明（决定模型在群里怎么说话、无人值守时**不许**做什么）。
  *
  * 单独抽成函数并导出，是为了让这段**产品契约**能被测试盯住：
  * 出站标记、群聊礼仪、无人值守的特权禁令、监听模式用法，缺一条都不行。
  */
 export function buildUsagePrompt(s = {}) {
-  const maxChars = Number.isFinite(s?.replyMaxChars) && s.replyMaxChars > 0 ? s.replyMaxChars : 1500
+  const maxChars = usagePromptMaxChars(s)
   const mode = normalizeReplyMode(s?.replyMode)
   return [
     '你正通过 dsh-qq-bridge 连着 QQ（可能是群聊，也可能是私聊）。',
@@ -2751,7 +3045,7 @@ export function buildUsagePrompt(s = {}) {
     '',
     '【怎么把话说回 QQ】',
     // 出站方式是**开关**（replyMode），提示词必须跟着变 —— 否则会教模型一个在本部署里
-    // 根本不生效的做法（用户 2026-09-30 要求「新增还是替换由用户选」）。
+    // 根本不生效的做法（用户 2026-09-30 要求“新增还是替换由用户选”）。
     ...(mode === 'tool'
       ? [
           '当前是 **tool 模式**：回群要调 `qq_bridge_send` 工具，把要说的话当参数发出去。',
@@ -2820,7 +3114,7 @@ export function extractQQReply(text) {
   const out = []
   // ⚠️ **开标记必须位于行首**（允许行首空白）。
   //
-  // 为什么：正文里若**提到这个标记本身**（例如解释用法时写「把它放进 [QQ] 里」），
+  // 为什么：正文里若**提到这个标记本身**（例如解释用法时写“把它放进 [QQ] 里”），
   // 那个孤立的开标记会被当成下一个块的开始，正则就会把**中间的整段正文**
   // 一路捕获到后面真正的闭标记 —— 真机上真的发生了，一大段给 DSH 看的正文被发进群。
   // 要求行首即可挡住行内提及，同时保留多行块的能力。

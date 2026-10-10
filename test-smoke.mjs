@@ -11,7 +11,7 @@ import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMes
 import { hashOfBuffer, loadStickers, saveStickers, shortHash, upsertSticker } from './stickers.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
-// 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过"只灌 1 条却显示 9 条"）。
+// 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过“只灌 1 条却显示 9 条”）。
 const statePath = process.env.TEMP + '/qq-bridge-smoke.json'
 if (existsSync(statePath)) rmSync(statePath, { force: true })
 
@@ -59,18 +59,18 @@ writeFileSync(
 
 const registered = []
 const warnings = []
-// settings.get() 在真实运行时返回「composition base + 用户层」的合并值，
+// settings.get() 在真实运行时返回“composition base + 用户层”的合并值，
 // 这里必须如实模拟，否则 config 里的白名单/昵称会被丢掉。
 let resolvedSettings = {}
 const registeredSettings = []
-// 捕获 ctx.on 注册的处理器：出站闸门要看「这一轮是不是 QQ 唤醒的」，只有真的喂事件才测得到
+// 捕获 ctx.on 注册的处理器：出站闸门要看“这一轮是不是 QQ 唤醒的”，只有真的喂事件才测得到
 const handlers = {}
-// 默认没有 agent；「端到端时序」那条用例会临时塞一个假 agent 进来
+// 默认没有 agent；“端到端时序”那条用例会临时塞一个假 agent 进来
 let fakeAgent = null
 // 恢复会话那条用例会塞这两个：假 sessionQuery + 捕获 resume 收到的参数
 let fakeSessionQuery = null
 let lastResumeOptions = null
-// 「描述缓存命中」用例会塞这两个：假 attachments + 假 llm（统计多模态调用次数）
+// “描述缓存命中”用例会塞这两个：假 attachments + 假 llm（统计多模态调用次数）
 let fakeAttachments = null
 let fakeLlm = null
 let visionStreamCalls = 0
@@ -105,7 +105,7 @@ const ctx = {
   },
 }
 // 真实 Cordis ctx 一定有 ctx.inject（可选注入用它）；假 ctx 也补上，
-// 这样「设置接口」那条路能被离线测到。
+// 这样“设置接口”那条路能被离线测到。
 ctx.inject = (_deps, cb) => cb(ctx)
 ctx.webServer = {
   register: (route) => {
@@ -120,7 +120,7 @@ const config = {
   statePath,
   debugTools: true,
   // ⚠️ 必须显式指向一个**不存在**的目录：否则测试结果会依赖本机
-  // $DSH_HOME/napcat 的真实状态（那里装过 NapCat 的话，"未安装时 launch 报错"
+  // $DSH_HOME/napcat 的真实状态（那里装过 NapCat 的话，“未安装时 launch 报错”
   // 这条断言就会走到下一个分支而失败）。
   napcatInstallDir: process.env.TEMP + '/qq-bridge-smoke-napcat-absent',
   nicknames: ['244', '小助手'],
@@ -141,10 +141,10 @@ apply(ctx, config)
 // 必须用这里保存的引用，否则喂进去的事件跑在别的 ctx 上（那些 ctx 的 state 是空的）。
 const mainSessionHandler = handlers['session/event']
 // legacy（0.1.5 形态）宿主上**不该**挂设置接口：老模型读 settings 命名空间、不读设置文件，
-// 挂上去只会是"改了不生效"的死接口。⚠️ 这条必须在**其它假 ctx 跑 apply 之前**断言 ——
+// 挂上去只会是“改了不生效”的死接口。⚠️ 这条必须在**其它假 ctx 跑 apply 之前**断言 ——
 // 后面那些 `{...ctx}` 会继承主 ctx 的 webServer，往同一个数组里塞路由（第一版就被污染了）。
 check('legacy 宿主上不挂设置路由', !capturedRoutes.some((r) => r.path === '/api/qq-bridge/settings'))
-// 三个操作按钮**不**受 legacy 门控：它们只管启动与打开，跟"设置值存在哪"无关，两代宿主都要挂。
+// 三个操作按钮**不**受 legacy 门控：它们只管启动与打开，跟“设置值存在哪”无关，两代宿主都要挂。
 check(
   'legacy 宿主上也挂 napcat 操作路由（打开 WebUI / 启动 / 打开文件夹）',
   ['/api/qq-bridge/napcat', '/api/qq-bridge/napcat/launch', '/api/qq-bridge/napcat/reveal'].every((p) =>
@@ -201,7 +201,7 @@ check('qq_bridge_sticker 存在（表情包）', !!registered.find((t) => t.name
   fakeAgent = null
   fakeAttachments = null
   fakeLlm = null
-  // 上面那次唤醒认领了"下一轮"，会把后面闸门用例的前提顶掉 —— 走一遍 turn/start+turn/end 还原。
+  // 上面那次唤醒认领了“下一轮”，会把后面闸门用例的前提顶掉 —— 走一遍 turn/start+turn/end 还原。
   handlers['session/event']({ id: 'session-smoke' }, { type: 'turn/start', data: { turn: 1 } })
   handlers['session/event']({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
 }
@@ -264,7 +264,7 @@ if (sim) {
   check('大小写 / 跨行都认', extractQQReply('[qq]\n跨行内容\n[/QQ]') === '跨行内容')
   check('未闭合 → 不发', extractQQReply('[QQ]没有结尾') === '')
   check('空输入安全', extractQQReply(undefined) === '')
-  // 关键回归：正文里"提到标记本身"不能把中间正文串进来（真机踩过，一大段正文被发进群）
+  // 关键回归：正文里“提到标记本身”不能把中间正文串进来（真机踩过，一大段正文被发进群）
   const prose = '要给 QQ 看的话放进 [QQ] 里。\n[QQ]你好[/QQ]\n后面是给自己看的技术细节'
   check('正文提及标记不会串味', extractQQReply(prose) === '你好', JSON.stringify(extractQQReply(prose)))
   const two = '技术说明一\n[QQ]第一句[/QQ]\n技术说明二\n[QQ]第二句[/QQ]\n尾注'
@@ -417,14 +417,14 @@ function sawSentText(s) {
   return sentTexts().some((t) => t.includes(s))
 }
 
-// 出站闸门必须看**来源**：只有「QQ 唤醒的那一轮」才允许出站。
-// 用户 2026-09-30 报的：「agent 分不清是在 QQ 还是 DSH 里」—— 用法说明是常驻系统提示，
-// DSH 界面里的那一轮模型同样看得到标记块规矩，所以闸门不能只看"有没有标记块"。
+// 出站闸门必须看**来源**：只有“QQ 唤醒的那一轮”才允许出站。
+// 用户 2026-09-30 报的：“agent 分不清是在 QQ 还是 DSH 里”—— 用法说明是常驻系统提示，
+// DSH 界面里的那一轮模型同样看得到标记块规矩，所以闸门不能只看“有没有标记块”。
 {
   const fire = (type, data, extra = {}) => handlers['session/event']({ id: 'session-smoke' }, { type, data, ...extra })
   const outbox = async () => JSON.parse(await status.execute({})).recentOutbox
   // ⚠️ status 只暴露 outbox 最后 3 条 —— 断言一律看**最新那条的内容**，不要比长度
-  //（长度比到 3 就永远相等，那种断言是"碰巧通过"）。
+  //（长度比到 3 就永远相等，那种断言是“碰巧通过”）。
   // outbox 现在只是**辅助口径**：主判据一律落在 sentTexts() 拿到的真实出站帧上。
   const sawText = (a, s) => a.some((o) => String(o.text ?? '').includes(s))
   const reply = (text) => fire('assistant/message', { message: { content: [{ type: 'text', text }] } })
@@ -458,7 +458,7 @@ function sawSentText(s) {
   // 判据换成真实出站帧：这一条必须是 socket 上真发出去的 send_private_msg。
   check('QQ 触发的轮次：正常出站且只取块内', lastSentText() === '群里看到这句', JSON.stringify(sentTexts()))
 
-  // C) 工具结果也是 user/message，不能把「这轮来自 QQ」冲掉
+  // C) 工具结果也是 user/message，不能把“这轮来自 QQ”冲掉
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   start()
   fire('user/message', { source: { kind: 'tool' } })
@@ -504,16 +504,16 @@ function sawSentText(s) {
   await endA()
   check('口子②：QQ 消息确实认领了它的下一轮', lastSentText() === '下一条消息起的那轮才是 QQ 轮', JSON.stringify(sentTexts()))
 
-  // I) 多轮延续（同一轮没有新的用户消息）：仍然是 QQ 轮 —— 别因为"turn/end 消费掉了"就哑火
+  // I) 多轮延续（同一轮没有新的用户消息）：仍然是 QQ 轮 —— 别因为“turn/end 消费掉了”就哑火
   start()
   reply('[QQ]第二轮延续也发得出去[/QQ]')
   await endA()
   check('多轮延续保持 QQ 轮（turn/end 不吞掉归属）', lastSentText() === '第二轮延续也发得出去', JSON.stringify(sentTexts()))
 
   // J) **哑火第 3 次回归（真机实测抓到的那条）**：QQ 消息之后紧跟一条 harness 注入的上下文
-  //    （`@deepseek-ai/dsh-system-prompt` 发的 "Current runtime context…"，它同样走
+  //    （`@deepseek-ai/dsh-system-prompt` 发的 “Current runtime context…”，它同样走
   //    user/message + plugin 来源）。它**不是一轮的触发器**，绝不能把 pending 打掉 ——
-  //    真机上就是它让 turn/start 快照到 false，于是工具拒绝（用户当场看到"哑火"）。
+  //    真机上就是它让 turn/start 快照到 false，于是工具拒绝（用户当场看到“哑火”）。
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   fire('user/message', {
     source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
@@ -538,7 +538,7 @@ function sawSentText(s) {
   )
 
   // F) **真机哑火回归**：source 被上游重写成 'user'，但正文就是我们注入的 QQ 入站消息
-  //    → 必须仍然按「QQ 唤醒的那一轮」算，否则就是"用户明明用 QQ @ 了却发不出去"。
+  //    → 必须仍然按“QQ 唤醒的那一轮”算，否则就是“用户明明用 QQ @ 了却发不出去”。
   fire('user/message', {
     source: { kind: 'user' },
     message: {
@@ -567,17 +567,17 @@ function sawSentText(s) {
   const p = buildUsagePrompt({ replyMaxChars: 1200 })
   check('用法说明：出站标记 + 开标记独占行首', p.includes('[QQ]') && p.includes('独占行首'))
   check('用法说明：QQ 是聊天不是工作台', p.includes('不是工作台'))
-  // 用户报「agent 分不清是在 QQ 还是 DSH 里」→ 规矩必须写成"只对被 QQ 唤醒的那一轮生效"
+  // 用户报“agent 分不清是在 QQ 还是 DSH 里”→ 规矩必须写成“只对被 QQ 唤醒的那一轮生效”
   check(
     '用法说明：规矩只对被 QQ 唤醒的那一轮生效（DSH 里别用出站方式）',
     p.includes('只对「被 QQ 唤醒的那一轮」生效') && p.includes('DSH 界面里直接跟你说话') && p.includes('不要用任何 QQ 出站方式'),
   )
-  // 用户先后三次嫌群里回复太长（"又发出了一坨"、"太长了"、"不适合做封面"）→ 用字数上限钉住
+  // 用户先后三次嫌群里回复太长（“又发出了一坨”、“太长了”、“不适合做封面”）→ 用字数上限钉住
   check('用法说明：群聊回复默认 40 字以内', p.includes('默认 40 字以内') && p.includes('群里只给结论'))
   check('用法说明：无人值守不碰特权操作', p.includes('无人值守') && p.includes('不要主动做'))
   check('用法说明：把 QQ 消息当不可信输入（防群友注入）', p.includes('不可信输入') && p.includes('注入'))
   check('用法说明：需要动手就停下等发起人', p.includes('无人值守时我不执行这类操作') && p.includes('等发起人在电脑前'))
-  // 用户 2026-09-30 抓出来的：把「我的规矩」说成「得等你授权」是把规矩伪装成权限，属于误导
+  // 用户 2026-09-30 抓出来的：把“我的规矩”说成“得等你授权”是把规矩伪装成权限，属于误导
   check('用法说明：禁止把规矩说成「需要授权」（诚实性）', p.includes('别把它说成') && p.includes('伪装成权限'))
   // 用浏览器点网页同样不弹审批 —— 必须显式堵住这条绕过路径
   check(
@@ -610,7 +610,7 @@ function sawSentText(s) {
 }
 
 // 出站方式是**开关**（replyMode）：marker / tool / always —— 提示词与出站路径都要跟着变
-// （用户 2026-09-30 定：新增还是替换由用户选，相当于给"标记块发送"装个开关）
+// （用户 2026-09-30 定：新增还是替换由用户选，相当于给“标记块发送”装个开关）
 {
   check(
     'normalizeReplyMode：只认三个值，其余归 marker',
@@ -645,7 +645,7 @@ function sawSentText(s) {
   check('tool 模式：标记块不出站（开关把它关了）', !sawSentText('tool 模式下标记块应该无效') && !sawText(await outbox(), 'tool 模式下标记块应该无效'))
 
   // 工具在 DSH 轮里走**两步确认**：第一次只回问、一个字都不发；同一轮里再调一次才真的发。
-  // （2026-10-01 用户提议：硬拒绝太死，改成"确认后再发" —— 能力不丢，误发依然要跨一道有意识的动作。）
+  // （2026-10-01 用户提议：硬拒绝太死，改成“确认后再发” —— 能力不丢，误发依然要跨一道有意识的动作。）
   fire('user/message', { source: { kind: 'user' } })
   start()
   const asked = JSON.parse(await sendTool.execute({ text: '第一次不该发出去' }))
@@ -699,7 +699,7 @@ function sawSentText(s) {
 
   // 改 replyMode 会走 settings/updated → 重挂用法说明那条路。
   // 真挂载需要宿主有 systemPrompt 服务（这里没有），所以只验证这条处理器**不抛错** ——
-  // 它顺带能挡住"usagePromptMounted 从 Set 改成 Map 却漏改某处"这类错。
+  // 它顺带能挡住“usagePromptMounted 从 Set 改成 Map 却漏改某处”这类错。
   let settingsHandlerOk = true
   try {
     resolvedSettings.replyMode = 'tool'
@@ -715,7 +715,7 @@ function sawSentText(s) {
 
 // ★ 端到端时序回归（哑火第 4 次的成因）：走**真实 handleInbound 路径**注入一条 QQ 消息，
 //   并让假 agent 的 followup() **同步**发出 turn/start（真机就是这个时序）。
-//   它专门盯"置位必须早于 send" —— 晚一拍，turn/start 就会快照到一个还没置位的 pending。
+//   它专门盯“置位必须早于 send” —— 晚一拍，turn/start 就会快照到一个还没置位的 pending。
 {
   const fire = (type, data) => handlers['session/event']({ id: 'session-smoke' }, { type, data })
   const outbox = async () => JSON.parse(await status.execute({})).recentOutbox
@@ -742,7 +742,7 @@ function sawSentText(s) {
     },
   }
 
-  // 用"叫到昵称"来保证必然唤醒（概率分支会 sampled-out，那样根本走不到注入）
+  // 用“叫到昵称”来保证必然唤醒（概率分支会 sampled-out，那样根本走不到注入）
   const r = JSON.parse(await sim.execute({ text: '244 在吗', userId: 'test-user' }))
   check('模拟注入走通真实 handleInbound 路径', r?.decision?.delivered === true, JSON.stringify(r?.decision ?? r))
   const text = String(injected?.content?.[0]?.text ?? '')
@@ -986,7 +986,7 @@ function sawSentText(s) {
   }
   lastResumeOptions = null
   fakeAgent = null
-  // 这里注入会走到 resume，而假 ctx 的 resume 故意抛错（模拟"没有 agent 工厂"）——
+  // 这里注入会走到 resume，而假 ctx 的 resume 故意抛错（模拟“没有 agent 工厂”）——
   // 我们要的是**它拿到了什么参数**，所以把异常接住即可。
   try {
     await sim.execute({ text: '244 在吗', userId: 'test-user' })
@@ -1031,8 +1031,13 @@ function sawSentText(s) {
   }
   check('client/client.js 语法可解析', parses)
 
+  // M1：卡片要能**撤销文件里的覆盖** —— 只有 set 时，用户从配置页改的值会被设置文件盖住。
+  check('M1：卡片有「撤销覆盖」入口', src.includes('撤销覆盖'))
+  check('M1：卡片的设置源暴露 unset（本机接口与设置域两条路）', src.includes('unset: async (field)') && src.includes('unset: (field)'))
+  check('M1：撤销覆盖的请求体走设置接口的 unset', src.includes('{ unset: [field] }'))
+
   // 真把 bundle 跑一遍：假 window.__ModuleLoader__ + 假 react + 假 ctx。
-  // 比字符串匹配强得多 —— key 写错在真机上是「不报错、界面静默空白」，
+  // 比字符串匹配强得多 —— key 写错在真机上是“不报错、界面静默空白”，
   // 那种失败只有把注册路径真跑一次才拦得住。
   {
     let def
@@ -1104,7 +1109,7 @@ function sawSentText(s) {
     // ★ 第三个变化轴（2026-10-01 桌面端真机）：**可写设置域的 key 也换了**。
     //   0.1.5 用 settings 命名空间 `qq-bridge`；0.2.0 用 profile entry id `include:qq-bridge`
     //   （宿主 Config 投影出来的是后者）。只绑前者 → 0.2.0 上永远 unavailable，
-    //   用户看到"这个部署没有为 qq-bridge 提供可写的设置服务"。
+    //   用户看到“这个部署没有为 qq-bridge 提供可写的设置服务”。
     {
       const bindSettings = mod.__test?.bindSettings
       check('bindSettings 已导出（便于测两代 key）', typeof bindSettings === 'function')
@@ -1143,7 +1148,7 @@ function sawSentText(s) {
         {
           const calls = []
           sandbox.fetch = async (url, init) => {
-            calls.push({ url: String(url), method: init?.method ?? 'GET' })
+            calls.push({ url: String(url), method: init?.method ?? 'GET', body: init?.body })
             const values = { nicknames: init?.method === 'POST' ? ['y'] : ['x'] }
             return { ok: true, status: 200, json: async () => ({ ok: true, values, overridden: ['nicknames'] }) }
           }
@@ -1172,6 +1177,16 @@ function sawSentText(s) {
             'set 走 POST 到 /api/qq-bridge/settings',
             calls.some((c) => c.method === 'POST' && c.url.includes('/api/qq-bridge/settings')),
             JSON.stringify(calls),
+          )
+          // M1：卡片的“撤销覆盖”必须真的把 unset 发给设置接口。
+          await apiScope.unset('nicknames')
+          const unsetCall = calls[calls.length - 1]
+          check(
+            'M1：卡片侧的 unset 发 { unset: ["nicknames"] } 到设置接口',
+            unsetCall?.method === 'POST' &&
+              unsetCall.url.includes('/api/qq-bridge/settings') &&
+              String(unsetCall.body) === JSON.stringify({ unset: ['nicknames'] }),
+            JSON.stringify(unsetCall),
           )
           check(
             '接口不可用（没有 fetch）时如实报 unavailable，不炸',
@@ -1225,7 +1240,7 @@ function sawSentText(s) {
       )
     }
 
-    // ★ 卡片必须覆盖**每一个** settings 键 —— 用户报的「设置里配不了 visionModel」就是这个：
+    // ★ 卡片必须覆盖**每一个** settings 键 —— 用户报的“设置里配不了 visionModel”就是这个：
     // 它在 Schema 里有、卡片 FIELDS 里却没做输入框 → 用户根本改不到。这条断言专防它。
     {
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
@@ -1257,7 +1272,7 @@ function sawSentText(s) {
     check('没有归档集时不会误删（fail-open）', so(list, 's1', undefined).length === 4)
   }
 
-  // status 要能回答「浏览器半到底装上没有」—— 界面里不显示时全靠这一条排障
+  // status 要能回答“浏览器半到底装上没有”—— 界面里不显示时全靠这一条排障
   const st = JSON.parse(await status.execute({}))
   check('qq_bridge_status 报告浏览器半状态', st.clientHalf && typeof st.clientHalf === 'object', JSON.stringify(st.clientHalf))
 }
@@ -1280,7 +1295,7 @@ function sawSentText(s) {
 }
 
 // 图片描述必须**就地**填回 [图片] 占位符，并带上短哈希（2026-10-01 用户真机反馈：以前描述另起一段
-// 附在末尾，模型会读成"这张图没解析出来、后面又来了一张"；短哈希让模型能指着一张具体的图存 / 发）
+// 附在末尾，模型会读成“这张图没解析出来、后面又来了一张”；短哈希让模型能指着一张具体的图存 / 发）
 {
   const i1 = { url: 'a', hash: 'aaaaaa1111111111' }
   const i2 = { url: 'b', hash: 'bbbbbb2222222222' }
@@ -1334,7 +1349,7 @@ function sawSentText(s) {
 
 // 回归（2026-10-01 桌面端真机）：DSH 0.2.0 的 settings 服务**没有 register/get**（#677），
 // 老代码在里面无条件调 register → apply() 抛错 → **fiber failed**；客户端半却照样进 boot graph，
-// 现象是"设置页有 tab、卡片说没有可写设置服务"。这几条断言专防它回来。
+// 现象是“设置页有 tab、卡片说没有可写设置服务”。这几条断言专防它回来。
 {
   check('hasLegacySettings：认得出老模型', hasLegacySettings({ register: () => {}, get: () => ({}) }) === true)
   check(
@@ -1389,14 +1404,25 @@ function sawSentText(s) {
     const out = { status: 0, body: '' }
     return { out, writeHead: (status) => { out.status = status }, end: (body) => { out.body = String(body ?? '') } }
   }
-  const req = (method, { addr = '127.0.0.1', body } = {}) => ({
-    method,
-    url: '/api/qq-bridge/settings',
-    socket: { remoteAddress: addr },
-    async *[Symbol.asyncIterator]() {
-      if (body !== undefined) yield Buffer.from(JSON.stringify(body))
-    },
-  })
+  // S1 之后**带请求体**的 POST 必须声明 JSON：默认带上 content-type 与 content-length，
+  // 测“不带 content-type”时显式给 `contentType: null`（content-length 仍然 > 0 = 有体）。
+  const req = (method, { addr = '127.0.0.1', body, headers = {}, contentType } = {}) => {
+    const ct = contentType === undefined ? (method === 'POST' ? 'application/json' : null) : contentType
+    const raw = body === undefined ? null : JSON.stringify(body)
+    return {
+      method,
+      url: '/api/qq-bridge/settings',
+      socket: { remoteAddress: addr },
+      headers: {
+        ...(ct ? { 'content-type': ct } : {}),
+        ...(raw === null ? {} : { 'content-length': String(Buffer.byteLength(raw)) }),
+        ...headers,
+      },
+      async *[Symbol.asyncIterator]() {
+        if (raw !== null) yield Buffer.from(raw)
+      },
+    }
+  }
 
   if (route) {
     const res1 = makeRes()
@@ -1443,6 +1469,227 @@ function sawSentText(s) {
       res6.out.body.slice(0, 160),
     )
     check('读到的 overridden 已不含被清掉的键', cleared.overridden?.includes('nicknames') !== true, JSON.stringify(cleared.overridden))
+
+    // ★ M1：撤销覆盖（unset）往返 —— 文件里的覆盖清掉后，该键回落到 composition config 的值。
+    {
+      const resSet = makeRes()
+      await route.handler(req('POST', { body: { set: { wakeProbability: 0.42 } } }), resSet)
+      const resGetCovered = makeRes()
+      await route.handler(req('GET'), resGetCovered)
+      const covered = JSON.parse(resGetCovered.out.body)
+      check(
+        'M1：文件覆盖生效（GET 读到覆盖值 + overridden 列出该键）',
+        covered.values?.wakeProbability === 0.42 && covered.overridden?.includes('wakeProbability'),
+        resGetCovered.out.body.slice(0, 160),
+      )
+
+      const resUnset = makeRes()
+      await route.handler(req('POST', { body: { unset: ['wakeProbability'] } }), resUnset)
+      const resGetFallen = makeRes()
+      await route.handler(req('GET'), resGetFallen)
+      const fallen = JSON.parse(resGetFallen.out.body)
+      check(
+        'M1：撤销覆盖后回落到 composition config 的值',
+        resUnset.out.status === 200 &&
+          fallen.values?.wakeProbability === config.wakeProbability &&
+          fallen.overridden?.includes('wakeProbability') !== true,
+        resGetFallen.out.body.slice(0, 160),
+      )
+    }
+
+    // ── S1：本机接口的准入判定（对端地址 + 来源 + POST 的 content-type）────────
+    // 威胁模型：用户浏览器里的任意网页都能用无预检的 fetch 打到 127.0.0.1；
+    // 响应读不到，但改设置 / 启动 NapCat 这类副作用照发生。
+    const settingsFilePath = join(dirname(statePath), 'qq-bridge-settings.json')
+    const fileValues = () => {
+      try {
+        return JSON.parse(readFileSync(settingsFilePath, 'utf8')).values ?? {}
+      } catch {
+        return {}
+      }
+    }
+    const errOf = (res) => {
+      try {
+        return String(JSON.parse(res.out.body).error ?? '')
+      } catch {
+        return ''
+      }
+    }
+    const beforeS1 = fileValues()
+    try {
+      // ① POST 带站外 Origin → 403，且设置一个字都没写进去。
+      const resEvil = makeRes()
+      await route.handler(
+        req('POST', { headers: { origin: 'https://evil.example' }, body: { set: { wakeProbability: 0.99 } } }),
+        resEvil,
+      )
+      check('S1：POST 带站外 Origin → 403', resEvil.out.status === 403, `${resEvil.out.status} ${resEvil.out.body.slice(0, 80)}`)
+      check(
+        'S1：站外 Origin 的 POST 没有改动设置',
+        JSON.stringify(fileValues()) === JSON.stringify(beforeS1),
+        JSON.stringify(fileValues()),
+      )
+      check(
+        'S1：403 的文案是中文且点出来源',
+        /[\u4e00-\u9fa5]/.test(errOf(resEvil)) && errOf(resEvil).includes('evil.example'),
+        errOf(resEvil),
+      )
+
+      // ② GET 带站外 Origin → 403（读接口同样不对外）。
+      const resGetEvil = makeRes()
+      await route.handler(req('GET', { headers: { origin: 'https://evil.example' } }), resGetEvil)
+      check('S1：GET 带站外 Origin → 403', resGetEvil.out.status === 403, `${resGetEvil.out.status} ${errOf(resGetEvil)}`)
+
+      // ③ 没有 Origin、只有站外 Referer → 同样拒绝（Referer 是兜底判据）。
+      const resRef = makeRes()
+      await route.handler(req('GET', { headers: { referer: 'https://evil.example/page' } }), resRef)
+      check('S1：没有 Origin、只有站外 Referer 的 GET → 403', resRef.out.status === 403, `${resRef.out.status} ${errOf(resRef)}`)
+
+      // ④ 卡片同源：Origin 是本机（端口不限）→ 通过。localhost 与 ::1 同样算本机。
+      const resCard = makeRes()
+      await route.handler(
+        req('POST', { headers: { origin: 'http://127.0.0.1:3080' }, body: { set: { wakeProbability: 0.25 } } }),
+        resCard,
+      )
+      check('S1：POST 带本机 Origin（卡片同源）→ 通过', resCard.out.status === 200, `${resCard.out.status} ${errOf(resCard)}`)
+      check('S1：本机 Origin 的 POST 真的写进去了', fileValues().wakeProbability === 0.25, JSON.stringify(fileValues()))
+      for (const origin of ['http://localhost:3080', 'http://[::1]:3080']) {
+        const resLoop = makeRes()
+        await route.handler(req('POST', { headers: { origin }, body: { set: { wakeProbability: 0.25 } } }), resLoop)
+        check(`S1：Origin=${origin} 也算本机 → 通过`, resLoop.out.status === 200, `${resLoop.out.status} ${errOf(resLoop)}`)
+      }
+
+      // ⑤ 带请求体的 POST：不声明 content-type 或声明非 JSON → 拒绝；声明 JSON → 通过。
+      //    前提写清楚：`body` 非空时夹具自动带 `content-length > 0`，服务端据此认定“有体”。
+      const resNoCt = makeRes()
+      await route.handler(req('POST', { contentType: null, body: { set: { wakeProbability: 0.3 } } }), resNoCt)
+      check(
+        'S1：带体 POST 不带 content-type → 拒绝',
+        resNoCt.out.status === 403,
+        `${resNoCt.out.status} ${errOf(resNoCt)}`,
+      )
+      check('S1：拒绝文案指出只接受 application/json', errOf(resNoCt).includes('application/json'), errOf(resNoCt))
+      const resTextPlain = makeRes()
+      await route.handler(req('POST', { contentType: 'text/plain', body: { set: { wakeProbability: 0.3 } } }), resTextPlain)
+      check(
+        'S1：带体 POST 用 text/plain（无预检的简单请求）→ 拒绝',
+        resTextPlain.out.status === 403,
+        `${resTextPlain.out.status} ${errOf(resTextPlain)}`,
+      )
+      const resJsonCt = makeRes()
+      await route.handler(req('POST', { body: { set: { wakeProbability: 0.3 } } }), resJsonCt)
+      check('S1：带体 POST 声明 application/json → 通过', resJsonCt.out.status === 200, `${resJsonCt.out.status} ${errOf(resJsonCt)}`)
+
+      // ⑤′ 空体 POST 不要求 content-type（旧 bundle 的卡片与命令行工具都走这条路）。
+      const resEmptyBody = makeRes()
+      await route.handler(
+        {
+          method: 'POST',
+          url: '/api/qq-bridge/settings',
+          socket: { remoteAddress: '127.0.0.1' },
+          headers: {},
+          async *[Symbol.asyncIterator]() {},
+        },
+        resEmptyBody,
+      )
+      check(
+        'S1：空体 POST 不带 content-type → 放行到业务层（缺 set/unset 的 400，而不是 403）',
+        resEmptyBody.out.status === 400 && errOf(resEmptyBody).includes('set'),
+        `${resEmptyBody.out.status} ${errOf(resEmptyBody)}`,
+      )
+      // 分块请求（transfer-encoding）同样按“有体”处理：没有 JSON content-type → 拒绝。
+      const resChunked = makeRes()
+      await route.handler(
+        {
+          method: 'POST',
+          url: '/api/qq-bridge/settings',
+          socket: { remoteAddress: '127.0.0.1' },
+          headers: { 'transfer-encoding': 'chunked' },
+          async *[Symbol.asyncIterator]() {},
+        },
+        resChunked,
+      )
+      check(
+        'S1：带 transfer-encoding（按有体处理）且无 JSON content-type → 拒绝',
+        resChunked.out.status === 403,
+        `${resChunked.out.status} ${errOf(resChunked)}`,
+      )
+
+      // 安全底线：放宽 content-type 之后，空体的**跨站** POST 仍必须被来源判定挡住。
+      const beforeEmptyEvil = fileValues()
+      const resEmptyEvil = makeRes()
+      await route.handler(
+        {
+          method: 'POST',
+          url: '/api/qq-bridge/settings',
+          socket: { remoteAddress: '127.0.0.1' },
+          headers: { origin: 'https://evil.example' },
+          async *[Symbol.asyncIterator]() {},
+        },
+        resEmptyEvil,
+      )
+      check(
+        'S1：空体 + 站外 Origin 的 POST → 仍然 403（放宽 content-type 的安全底线）',
+        resEmptyEvil.out.status === 403,
+        `${resEmptyEvil.out.status} ${errOf(resEmptyEvil)}`,
+      )
+      check(
+        'S1：空体跨站 POST 前后，设置文件逐字节相同',
+        JSON.stringify(fileValues()) === JSON.stringify(beforeEmptyEvil),
+        JSON.stringify({ before: beforeEmptyEvil, after: fileValues() }),
+      )
+
+      // ⑥ 命令行场景：既无 Origin 也无 Referer，带 JSON content-type → 通过。
+      const resCli = makeRes()
+      await route.handler(req('POST', { body: { set: { wakeProbability: 0.35 } } }), resCli)
+      check('S1：无 Origin 无 Referer 的命令行 POST → 通过', resCli.out.status === 200, `${resCli.out.status} ${errOf(resCli)}`)
+
+      // ⑦ 对端不是回环地址 → 仍然拒绝（回归）。
+      const resRemote = makeRes()
+      await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.4 } } }), resRemote)
+      check('S1：对端非回环地址的 POST → 403（回归）', resRemote.out.status === 403, `${resRemote.out.status} ${errOf(resRemote)}`)
+      check('S1：对端非回环的文案说明只接受本机请求', errOf(resRemote).includes('本机'), errOf(resRemote))
+
+      // ⑧ 其余报错码也要说清发生了什么（用户看得懂才有下一步）。
+      const resBadJson = makeRes()
+      await route.handler(
+        {
+          method: 'POST',
+          url: '/api/qq-bridge/settings',
+          socket: { remoteAddress: '127.0.0.1' },
+          headers: { 'content-type': 'application/json' },
+          async *[Symbol.asyncIterator]() {
+            yield Buffer.from('{ 不是 JSON')
+          },
+        },
+        resBadJson,
+      )
+      check(
+        'S1：请求体不是合法 JSON → 400 且文案是中文',
+        resBadJson.out.status === 400 && /[\u4e00-\u9fa5]/.test(errOf(resBadJson)),
+        `${resBadJson.out.status} ${errOf(resBadJson)}`,
+      )
+
+      const resNoSet = makeRes()
+      await route.handler(req('POST', { body: {} }), resNoSet)
+      check(
+        'S1：缺少 set / unset → 400 且文案点出 set',
+        resNoSet.out.status === 400 && errOf(resNoSet).includes('set'),
+        `${resNoSet.out.status} ${errOf(resNoSet)}`,
+      )
+
+      const resMethod = makeRes()
+      await route.handler(req('DELETE'), resMethod)
+      check(
+        'S1：既不是 GET 也不是 POST → 405 且文案是中文',
+        resMethod.out.status === 405 && /[\u4e00-\u9fa5]/.test(errOf(resMethod)),
+        `${resMethod.out.status} ${errOf(resMethod)}`,
+      )
+    } finally {
+      // S1 用例写进去的覆盖必须清掉，别留给后面的用例。
+      const resClean = makeRes()
+      await route.handler(req('POST', { body: { unset: ['wakeProbability'] } }), resClean)
+    }
   }
 }
 
@@ -1476,12 +1723,29 @@ function sawSentText(s) {
     const out = { status: 0, body: '' }
     return { out, writeHead: (status) => { out.status = status }, end: (body) => { out.body = String(body ?? '') } }
   }
-  const req = (method, { addr = '127.0.0.1', url = '' } = {}) => ({
-    method,
-    url,
-    socket: { remoteAddress: addr },
-    async *[Symbol.asyncIterator]() {},
-  })
+  // S1：NapCat 的三个动作没有请求体 —— 默认不带 content-length（= 空体，不要求 content-type）。
+  // 要造“有体”的场景时显式给 `contentLength`（服务端只看这个判有没有体）。
+  const req = (method, { addr = '127.0.0.1', url = '', headers = {}, contentType, contentLength } = {}) => {
+    const ct = contentType === undefined ? (method === 'POST' ? 'application/json' : null) : contentType
+    return {
+      method,
+      url,
+      socket: { remoteAddress: addr },
+      headers: {
+        ...(ct ? { 'content-type': ct } : {}),
+        ...(contentLength === undefined ? {} : { 'content-length': String(contentLength) }),
+        ...headers,
+      },
+      async *[Symbol.asyncIterator]() {},
+    }
+  }
+  const errOf = (res) => {
+    try {
+      return String(JSON.parse(res.out.body).error ?? '')
+    } catch {
+      return ''
+    }
+  }
 
   const napcatGet = handlerFor('/api/qq-bridge/napcat')
   const res1 = makeRes()
@@ -1522,6 +1786,112 @@ function sawSentText(s) {
   await napcatLaunchRoute(req('POST', { addr: '10.0.0.9', url: '/api/qq-bridge/napcat/launch' }), res3)
   check('POST /napcat/launch：非本机请求 403', res3.out.status === 403, String(res3.out.status))
 
+  // ── S1：三个 NapCat 路由走同一道准入闸门 ─────────────────────────────────
+  // 这组接口能启动进程、打开文件管理器 —— 站外页面一律挡住，且**不能走到动作**。
+  const resEvilOrigin = makeRes()
+  await napcatLaunchRoute(
+    req('POST', { url: '/api/qq-bridge/napcat/launch', headers: { origin: 'https://evil.example' } }),
+    resEvilOrigin,
+  )
+  check('S1：POST /napcat/launch 带站外 Origin → 403', resEvilOrigin.out.status === 403, `${resEvilOrigin.out.status} ${errOf(resEvilOrigin)}`)
+  check('S1：POST /napcat/launch 的拒绝文案是中文', /[\u4e00-\u9fa5]/.test(errOf(resEvilOrigin)), errOf(resEvilOrigin))
+
+  const resNapcatGet = makeRes()
+  await napcatGet(req('GET', { url: '/api/qq-bridge/napcat', headers: { origin: 'https://evil.example' } }), resNapcatGet)
+  check('S1：GET /napcat 带站外 Origin → 403', resNapcatGet.out.status === 403, `${resNapcatGet.out.status} ${errOf(resNapcatGet)}`)
+
+  // /reveal 的**通过**路径会真的调 explorer / open —— 这里只测拒绝路径，
+  // 否则测试机上的文件管理器会被弹出来。
+  const napcatRevealRoute = handlerFor('/api/qq-bridge/napcat/reveal')
+  const resRevealEvil = makeRes()
+  await napcatRevealRoute(
+    req('POST', { url: '/api/qq-bridge/napcat/reveal', headers: { origin: 'https://evil.example' } }),
+    resRevealEvil,
+  )
+  check('S1：POST /napcat/reveal 带站外 Origin → 403（没走到动作）', resRevealEvil.out.status === 403, `${resRevealEvil.out.status} ${errOf(resRevealEvil)}`)
+
+  // content-type 只在**带请求体**时要求 JSON。三个动作本身没有体，
+  // 所以空体 POST 放行到动作层 —— 但来源判定照样生效（见上面的 403 用例）。
+  const resNoCt = makeRes()
+  await napcatLaunchRoute(req('POST', { url: '/api/qq-bridge/napcat/launch', contentType: null }), resNoCt)
+  let emptyBody = null
+  try {
+    emptyBody = JSON.parse(resNoCt.out.body)
+  } catch {
+    emptyBody = null
+  }
+  check(
+    'S1：POST /napcat/launch 空体 + 不带 content-type → 放行到动作层',
+    resNoCt.out.status === 200 && typeof emptyBody?.ok === 'boolean',
+    `${resNoCt.out.status} ${resNoCt.out.body.slice(0, 120)}`,
+  )
+
+  // 空体 + 站外 Origin → 仍然 403：这是放宽 content-type 之后的安全底线。
+  const resEmptyEvil = makeRes()
+  await napcatLaunchRoute(
+    req('POST', { url: '/api/qq-bridge/napcat/launch', contentType: null, headers: { origin: 'https://evil.example' } }),
+    resEmptyEvil,
+  )
+  check(
+    'S1：空体 + 站外 Origin 的 POST /napcat/launch → 仍然 403',
+    resEmptyEvil.out.status === 403,
+    `${resEmptyEvil.out.status} ${errOf(resEmptyEvil)}`,
+  )
+
+  // 带请求体时：text/plain（跨站无预检时唯一可用的那类）→ 403；application/json → 放行。
+  const resBodyText = makeRes()
+  await napcatLaunchRoute(
+    req('POST', { url: '/api/qq-bridge/napcat/launch', contentType: 'text/plain', contentLength: 11 }),
+    resBodyText,
+  )
+  check(
+    'S1：带体 + text/plain 的 POST /napcat/launch → 403',
+    resBodyText.out.status === 403,
+    `${resBodyText.out.status} ${errOf(resBodyText)}`,
+  )
+  const resBodyJson = makeRes()
+  await napcatLaunchRoute(
+    req('POST', { url: '/api/qq-bridge/napcat/launch', contentLength: 11 }),
+    resBodyJson,
+  )
+  let bodyJson = null
+  try {
+    bodyJson = JSON.parse(resBodyJson.out.body)
+  } catch {
+    bodyJson = null
+  }
+  check(
+    'S1：带体 + application/json 的 POST /napcat/launch → 放行到动作层',
+    resBodyJson.out.status === 200 && typeof bodyJson?.ok === 'boolean',
+    `${resBodyJson.out.status} ${resBodyJson.out.body.slice(0, 120)}`,
+  )
+
+  // 卡片同源 + JSON content-type → 放行到动作层（这台机器没装 NapCat，动作本身 ok:false）。
+  const resLaunchOk = makeRes()
+  await napcatLaunchRoute(
+    req('POST', { url: '/api/qq-bridge/napcat/launch', headers: { origin: 'http://127.0.0.1:3080' } }),
+    resLaunchOk,
+  )
+  let launchBody = null
+  try {
+    launchBody = JSON.parse(resLaunchOk.out.body)
+  } catch {
+    launchBody = null
+  }
+  check(
+    'S1：POST /napcat/launch 带本机 Origin + JSON → 放行到动作层（不是 403）',
+    resLaunchOk.out.status === 200 && typeof launchBody?.ok === 'boolean',
+    `${resLaunchOk.out.status} ${resLaunchOk.out.body.slice(0, 120)}`,
+  )
+
+  const resMethodMiss = makeRes()
+  await napcatLaunchRoute(req('GET', { url: '/api/qq-bridge/napcat/launch' }), resMethodMiss)
+  check(
+    'S1：方法与路由不符 → 405 且文案是中文',
+    resMethodMiss.out.status === 405 && /[\u4e00-\u9fa5]/.test(errOf(resMethodMiss)),
+    `${resMethodMiss.out.status} ${errOf(resMethodMiss)}`,
+  )
+
   // launch / reveal 在测试机上必然失败（没有 NapCat，也不该真去开文件管理器），
   // 但必须**回 JSON 而不是抛** —— 抛出去会让宿主那条请求挂死。
   // 这里用 legacy 那份路由：它的 installDir 是不存在的目录，所以 reveal 不会真的启动进程。
@@ -1548,7 +1918,7 @@ function sawSentText(s) {
 
 // ★ 表情包工具：登记（save）/ 列表（list）/ 发送（send，base64 出站）。
 //   独立 ctx（自己的 handler map、自己的 statePath、假 WebSocket）—— 与前面的用例完全隔离，
-//   也正因为隔离，这里可以真跑一遍"发送成功"的路径。
+//   也正因为隔离，这里可以真跑一遍“发送成功”的路径。
 {
   const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-sticker-tool-'))
   const statePathS = join(dir, 'state.json')
@@ -1609,6 +1979,8 @@ function sawSentText(s) {
   const registered2 = []
   const resolved2 = {}
   const disposers = []
+  // M2 / M7 的用例要一个可唤醒、可回注的目标 agent；默认没有（其余用例不受影响）。
+  let stickerAgent = null
   const ctxS = {
     logger: { info() {}, warn: (m) => warnings.push(String(m)) },
     settings: {
@@ -1618,7 +1990,11 @@ function sawSentText(s) {
       },
       get: () => resolved2,
     },
-    agents: { get: () => undefined, roots: () => [], resume: async () => { throw new Error('no factory') } },
+    agents: {
+      get: (id) => (stickerAgent && stickerAgent.id === id ? stickerAgent : undefined),
+      roots: () => [],
+      resume: async () => { throw new Error('no factory') },
+    },
     tools: { register: (def) => registered2.push(def) },
     on: (name, fn) => {
       stickerHandlers[name] = fn
@@ -1793,6 +2169,179 @@ function sawSentText(s) {
     check('标记块超长被拒也不落 outbox', !(await sawOutbox('yyyy')))
   }
 
+  // ★ M2：占位符与图片必须**逐位对齐** —— 某一张落盘失败时，后面的图不得往前顶位。
+  //   用假 WebSocket 喂真实 OneBot 事件，走完整 handleInbound（含 cacheImage 与描述填入）。
+  //   两条断言在修复前都会红：旧代码只把**落盘成功**的图按顺序传给 inlineImageNotes，
+  //   于是第 2 张的描述落到第 1 个占位符上（第 1 条），或末位占位符拿不到“（未描述）”（第 2 条）。
+  {
+    const savedFetch = globalThis.fetch
+    const savedAgent = stickerAgent
+    const savedAttach = resolved2.attachRecentChat
+    let injectedM2 = null
+    const short = shortHash(hash)
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+    // 发一条带 2 张图的 QQ 私聊消息，等唤醒注入；返回本条入站那一段正文。
+    const fireImages = async (urls) => {
+      injectedM2 = null
+      const socket = sockets.find((s) => s.readyState === 1)
+      socket.onmessage({
+        data: JSON.stringify({
+          post_type: 'message',
+          message_type: 'private',
+          user_id: 'test-user',
+          self_id: 10001,
+          message: [
+            { type: 'text', data: { text: '244 看这两张 ' } },
+            ...urls.map((url, i) => ({ type: 'image', data: { url, file: `${i}.png` } })),
+          ],
+          sender: { nickname: '群友' },
+        }),
+      })
+      for (let i = 0; i < 60 && injectedM2 === null; i++) await wait(10)
+      const text = String(injectedM2?.content?.[0]?.text ?? '')
+      const line = text.split('\n').find((l) => l.startsWith('[QQ · ')) ?? text
+      return line.replace(/^\[QQ · 私聊\] 群友：244 看这两张 /, '')
+    }
+    try {
+      stickerAgent = {
+        id: 'session-sticker',
+        status: 'idle',
+        ctx: { get: () => undefined, effect: () => () => {} },
+        followup: (m) => { injectedM2 = m },
+      }
+      // 摘要不掺进来：断言只看本条消息那一段。
+      resolved2.attachRecentChat = false
+      globalThis.fetch = async (url) => {
+        if (String(url).includes('bad')) throw new Error('fetch failed')
+        return {
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength),
+        }
+      }
+
+      const badFirst = await fireImages(['https://bad.invalid/1.png', 'https://good.invalid/2.png'])
+      check('M2：第 1 张落盘失败 → 第 1 个占位符保持无描述', badFirst.startsWith('[图片]（未描述）'), badFirst)
+      check(
+        'M2：第 2 张的描述与短哈希落在第 2 个占位符上',
+        badFirst === `[图片]（未描述）[图片#${short}]：一只无语的猫`,
+        badFirst,
+      )
+
+      const goodFirst = await fireImages(['https://good.invalid/1.png', 'https://bad.invalid/2.png'])
+      check('M2：反过来时第 1 个占位符拿自己的描述', goodFirst.startsWith(`[图片#${short}]：一只无语的猫`), goodFirst)
+      check(
+        'M2：末位占位符保持无描述（被拒的图没有消耗描述，也没有被顶掉）',
+        goodFirst === `[图片#${short}]：一只无语的猫[图片]（未描述）`,
+        goodFirst,
+      )
+
+      // 唤醒认领了“下一轮”，走一遍 turn/start + turn/end 把闸门还原。
+      stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/start', data: { turn: 9 } })
+      stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/end', data: { turn: 9, reason: { kind: 'completed' } } })
+    } finally {
+      globalThis.fetch = savedFetch
+      stickerAgent = savedAgent
+      if (savedAttach === undefined) delete resolved2.attachRecentChat
+      else resolved2.attachRecentChat = savedAttach
+    }
+  }
+
+  // ★ M7：标记块被拒 → 独立丢弃台账 + 原因回注会话；outbox 保持干净。
+  //   本块最后会关掉假 WebSocket（造 not-connected），后面的用例不再用传输。
+  {
+    const savedAgent = stickerAgent
+    let injectedDrop = null
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+    const statusOf = async () => JSON.parse(await status2.execute({}))
+    const waitForDrop = async (n) => {
+      for (let i = 0; i < 60; i++) {
+        if ((await statusOf()).recentDropped.length > n) return
+        await wait(10)
+      }
+    }
+    const qqTurn = (turn, text) => {
+      stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'qq-bridge' } } })
+      stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/start', data: { turn } })
+      stickerHandlers['session/event'](
+        { id: 'session-sticker' },
+        { type: 'assistant/message', data: { turn, step: 1, message: { content: [{ type: 'text', text }] } } },
+      )
+      stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+    }
+    try {
+      stickerAgent = {
+        id: 'session-sticker',
+        status: 'idle',
+        ctx: { get: () => undefined, effect: () => () => {} },
+        followup: () => {},
+        inject: (m) => { injectedDrop = m },
+      }
+      const baseline = (await statusOf()).recentDropped.length
+      const long = 'z'.repeat(2000)
+      qqTurn(11, `[QQ]${long}[/QQ]`)
+      await waitForDrop(baseline)
+      const st = await statusOf()
+      const lastDrop = st.recentDropped[st.recentDropped.length - 1]
+      check(
+        'M7：标记块超长被拒 → recentDropped 记一条 too-long（via=marker）',
+        lastDrop?.reason === 'too-long' && lastDrop?.via === 'marker',
+        JSON.stringify(lastDrop),
+      )
+      check('M7：丢弃台账带 limit 与 length', lastDrop?.limit === 1500 && lastDrop?.length === long.length, JSON.stringify(lastDrop))
+      check(
+        'M7：丢弃台账记了目的地',
+        lastDrop?.destination?.kind === 'private' && String(lastDrop.destination.userId) === 'test-user',
+        JSON.stringify(lastDrop?.destination),
+      )
+      check('M7：被拒的出站不写 outbox（台账不记假账）', !st.recentOutbox.some((e) => String(e.text).includes('zzzz')), JSON.stringify(st.recentOutbox))
+      check(
+        'M7：丢弃台账落盘（state 文件里有这条 too-long）',
+        (() => {
+          try {
+            return JSON.parse(readFileSync(statePathS, 'utf8')).dropped?.some((e) => e.reason === 'too-long' && e.limit === 1500)
+          } catch {
+            return false
+          }
+        })(),
+        statePathS,
+      )
+      const notice = String(injectedDrop?.content?.[0]?.text ?? '')
+      check(
+        'M7：回注会话的通知含原因与字数/上限',
+        notice.includes('too-long') && notice.includes(String(long.length)) && notice.includes('1500'),
+        notice,
+      )
+
+      // not-connected 同样进丢弃台账（关掉假 WebSocket 即造出未连接）。
+      const socket = sockets.find((s) => s.readyState === 1)
+      socket.close()
+      await wait(20)
+      injectedDrop = null
+      qqTurn(12, '[QQ]not-connected 这一条[/QQ]')
+      await waitForDrop(st.recentDropped.length)
+      const st2 = await statusOf()
+      const last2 = st2.recentDropped[st2.recentDropped.length - 1]
+      check('M7：not-connected 也进 recentDropped', last2?.reason === 'not-connected', JSON.stringify(last2))
+      check('M7：not-connected 也不写 outbox', !st2.recentOutbox.some((e) => String(e.text).includes('not-connected 这一条')), JSON.stringify(st2.recentOutbox))
+      check(
+        'M7：not-connected 的回注通知含原因',
+        String(injectedDrop?.content?.[0]?.text ?? '').includes('not-connected'),
+        String(injectedDrop?.content?.[0]?.text ?? ''),
+      )
+
+      // ★ 回注消息本身不得被当成一次 QQ 入站：闸门按 id 认出它就不碰 pendingFromQQ。
+      //   漏掉这一步时 pendingFromQQ 被抬成 true，下一轮可能被误判成 QQ 唤醒的那一轮。
+      check('M7：回注消息带 id（闸门靠它认出回注）', typeof injectedDrop?.id === 'string' && injectedDrop.id !== '')
+      stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'user/message', data: { source: { kind: 'user' } } })
+      stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'user/message', data: injectedDrop })
+      const gate = (await statusOf()).gate
+      check('M7：回注消息不抬闸门（pendingFromQQ 保持 false）', gate.pendingFromQQ === false, JSON.stringify(gate))
+    } finally {
+      stickerAgent = savedAgent
+    }
+  }
+
   // 不受 debugTools 限制：关掉调试工具，表情包工具仍在
   {
     const registered3 = []
@@ -1858,11 +2407,16 @@ function sawSentText(s) {
   // 观测点：模型列表被枚举几次、多模态调用收到哪个 provider/model。
   let listModelsCalls = 0
   let modelsV = []
+  // M4：`boom: true` 的 provider 列举时抛错 —— 用来盯“失败被静默吞掉”。
+  let providersV = [{ id: 'prov-a' }]
   const streamedV = []
   const llmV = {
-    listProviders: () => [{ id: 'prov-a' }],
-    listModels: async () => {
+    listProviders: () => providersV,
+    listModels: async (providerId) => {
       listModelsCalls += 1
+      if (providersV.some((p) => p.id === providerId && p.boom === true)) {
+        throw new Error(`列举 ${providerId} 失败：模拟故障`)
+      }
       return modelsV
     },
     stream: async function* (opts) {
@@ -1924,6 +2478,7 @@ function sawSentText(s) {
   check('视觉模型：独立 ctx 挂上了状态工具与设置路由', !!statusV && !!simV && !!routeV)
 
   // 用设置接口改值 —— 与真机上卡片的路径一致（写文件后调 applySettingChanges）。
+  // S1 之后 POST 必须声明 JSON 请求体，这里与卡片一样带上 content-type。
   const setV = async (set) => {
     const out = { status: 0, body: '' }
     await routeV.handler(
@@ -1931,6 +2486,7 @@ function sawSentText(s) {
         method: 'POST',
         url: '/api/qq-bridge/settings',
         socket: { remoteAddress: '127.0.0.1' },
+        headers: { 'content-type': 'application/json' },
         async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ set })) },
       },
       { writeHead: (s) => { out.status = s }, end: (b) => { out.body = String(b ?? '') } },
@@ -2040,6 +2596,31 @@ function sawSentText(s) {
       '视觉模型：失败结果不留 → 改别的设置项也会重试并拿到补上的模型',
       retried?.provider === 'prov-e' && retried?.model === 'smoke-vision-e' && listModelsCalls === beforeFail + 2,
       JSON.stringify({ retried, listModelsCalls }),
+    )
+
+    // ── M4：单个 provider 列举失败不能被静默当成“这个部署没有视觉模型” ──────
+    // 行为不变（继续找下一个 provider），但必须留下 warn，带上 provider id 与失败原因。
+    providersV = [{ id: 'prov-broken', boom: true }, { id: 'prov-ok' }]
+    modelsV = [{ id: 'smoke-vision-f', provider: 'prov-ok', inputModalities: ['image'] }]
+    const beforeM4 = listModelsCalls
+    const warnedM4 = warnings.length
+    await setV({ visionModel: 'no-slash-f' })
+    const foundM4 = await resolvedV()
+    const newWarnsM4 = warnings.slice(warnedM4).map(String)
+    check(
+      'M4：provider 列举失败 → 有 warn，且带 provider id',
+      newWarnsM4.some((w) => w.includes('prov-broken')),
+      JSON.stringify(newWarnsM4),
+    )
+    check(
+      'M4：warn 里带失败原因',
+      newWarnsM4.some((w) => w.includes('模拟故障')),
+      JSON.stringify(newWarnsM4),
+    )
+    check(
+      'M4：失败的 provider 不中断查找 —— 仍然从下一个 provider 找到视觉模型',
+      foundM4?.provider === 'prov-ok' && foundM4?.model === 'smoke-vision-f' && listModelsCalls === beforeM4 + 2,
+      JSON.stringify({ foundM4, listModelsCalls }),
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -2252,6 +2833,304 @@ function sawSentText(s) {
     if (originalDelivery === undefined) delete resolvedSettings.delivery
     else resolvedSettings.delivery = originalDelivery
     fakeAgent = null
+    fire('turn/end', { reason: { kind: 'completed' } })
+  }
+}
+
+// ★ S2：用法说明的重挂判据是“提示词依赖的全部设置”的签名，不只是出站方式。
+//   正文是挂载那一刻的快照，里面内嵌了出站字数上限 —— 签名少一项就是同一类 bug：
+//   把上限从 1500 改成 300 却不重挂，常驻提示仍写 1500，模型写 600 字会被 too-long 丢掉。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-usage-'))
+  const statePathU = join(dir, 'state.json')
+  writeFileSync(statePathU, `${JSON.stringify({ buffer: [] })}\n`, 'utf8')
+
+  const toolsU = []
+  const sectionsU = [] // 每次挂载收到的提示词片段
+  const unmountedU = [] // 每次重挂前卸载掉的片段下标
+  const effectsU = []
+  const handlersU = {}
+  let resolvedU = {}
+
+  const spU = {
+    context: (section) => {
+      sectionsU.push(section)
+      const at = sectionsU.length - 1
+      return () => {
+        unmountedU.push(at)
+      }
+    },
+  }
+  const agentCtxU = {
+    get: (name) => (name === 'systemPrompt' ? spU : undefined),
+    effect: (fn) => fn(),
+  }
+  const agentU = { id: 'session-usage', status: 'idle', ctx: agentCtxU, followup: () => {} }
+  const ctxU = {
+    logger: { info() {}, warn() {} },
+    settings: {
+      register: (ns, schema, opts) => {
+        resolvedU = { ...(opts?.base ?? {}) }
+        return {}
+      },
+      get: () => resolvedU,
+    },
+    agents: {
+      get: (id) => (id === agentU.id ? agentU : undefined),
+      roots: () => [],
+      resume: async () => {
+        throw new Error('usage: no agent factory')
+      },
+    },
+    tools: { register: (def) => toolsU.push(def) },
+    on: (name, fn) => {
+      handlersU[name] = fn
+      return () => {}
+    },
+    effect: (fn) => {
+      const d = fn()
+      if (typeof d === 'function') effectsU.push(d)
+      return d
+    },
+    get: () => undefined,
+  }
+  ctxU.inject = (_deps, cb) => cb(ctxU)
+  ctxU.webServer = { register: () => () => {} }
+
+  try {
+    apply(ctxU, {
+      targetSessionId: agentU.id,
+      statePath: statePathU,
+      debugTools: true,
+      onebotUrl: '',
+      wakeProbability: 0,
+      nicknames: ['244'],
+      whitelist: ['u-user'],
+      groupWhitelist: [],
+      replyMaxChars: 1500,
+      napcatInstallDir: join(dir, 'no-napcat'),
+    })
+    const simU = toolsU.find((t) => t.name === 'qq_bridge_simulate')
+    check('S2：独立 ctx 挂上了模拟工具', !!simU)
+
+    // 唤醒一次 → ensureTargetAgent 命中活 agent → 挂上用法说明。
+    const woke = JSON.parse(await simU.execute({ text: '244 你好', userId: 'u-user', nickname: '群友' }))
+    check(
+      'S2：唤醒走通并挂上用法说明',
+      woke?.decision?.delivered === true && sectionsU.length === 1,
+      JSON.stringify({ delivered: woke?.decision?.delivered, sections: sectionsU.length }),
+    )
+    const textAt = (i) => String(sectionsU[i]?.text ?? '')
+    check('S2：挂载的提示词用当时的 replyMaxChars（1500）', textAt(0).includes('超过 1500 字'), textAt(0).slice(-60))
+    check('S2：挂载的提示词用当时的 replyMode（marker）', textAt(0).includes('[QQ] 与 [/QQ]'), textAt(0).slice(0, 80))
+
+    // 改一个提示词**不依赖**的设置 → 不重挂（否则改昵称也要白挂一次）。
+    resolvedU.nicknames = ['244', '小助手']
+    handlersU['settings/updated']?.('qq-bridge')
+    check('S2：改 nicknames（提示词不依赖）→ 不重挂', sectionsU.length === 1, String(sectionsU.length))
+    check('S2：不重挂时没有卸载过旧片段', unmountedU.length === 0, JSON.stringify(unmountedU))
+
+    // 改 replyMaxChars → 必须重挂，且新提示词里的上限跟着变。
+    resolvedU.replyMaxChars = 300
+    handlersU['settings/updated']?.('qq-bridge')
+    check(
+      'S2：改 replyMaxChars → 确实重挂（并卸掉旧片段）',
+      sectionsU.length === 2 && unmountedU.length === 1,
+      JSON.stringify({ sections: sectionsU.length, unmounted: unmountedU.length }),
+    )
+    check('S2：重挂后的提示词写的是新上限 300', textAt(1).includes('超过 300 字'), textAt(1).slice(-60))
+    check('S2：重挂后的提示词不再写旧上限 1500', !textAt(1).includes('超过 1500 字'), textAt(1).slice(-60))
+
+    // 改 replyMode → 同样重挂（原有行为不能退化）。
+    resolvedU.replyMode = 'tool'
+    handlersU['settings/updated']?.('qq-bridge')
+    check(
+      'S2：改 replyMode → 仍然重挂',
+      sectionsU.length === 3 && unmountedU.length === 2,
+      JSON.stringify({ sections: sectionsU.length, unmounted: unmountedU.length }),
+    )
+    check('S2：重挂后的提示词切到 tool 模式', textAt(2).includes('tool 模式'), textAt(2).slice(0, 80))
+  } finally {
+    for (const dispose of effectsU) {
+      try {
+        dispose()
+      } catch {
+        // 卸载顺序与用例结论无关，忽略。
+      }
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ★ S3：目标 agent 被卸载后，旧句柄必须验活再复用。
+//   命中死句柄时每次唤醒都投给已销毁的 agent，`resume` 永不再执行，
+//   台账逐条记 `wake-failed`，事后查不出句柄已死。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-handles-'))
+  const statePathH = join(dir, 'state.json')
+  writeFileSync(statePathH, `${JSON.stringify({ buffer: [] })}\n`, 'utf8')
+
+  const toolsH = []
+  const warningsH = []
+  const effectsH = []
+  let registry = null // null = 这个会话不在注册表（已被卸载）
+  let resumeCalls = 0
+  const deliveredTo = []
+  const mkAgent = (n) => ({
+    id: 'session-stale',
+    status: 'idle',
+    ctx: { get: () => undefined, effect: () => () => {} },
+    followup: () => {
+      deliveredTo.push(n)
+    },
+  })
+  const ctxH = {
+    logger: { info() {}, warn: (m) => warningsH.push(String(m)) },
+    settings: { describe: () => [], update: async () => {}, configure: () => () => {} }, // 非 legacy
+    agents: {
+      get: (id) => (registry !== null && registry.id === id ? registry : undefined),
+      roots: () => [],
+      resume: async () => {
+        resumeCalls += 1
+        return { agent: mkAgent(resumeCalls), dispose: () => {} }
+      },
+    },
+    tools: { register: (def) => toolsH.push(def) },
+    on: () => () => {},
+    effect: (fn) => {
+      const d = fn()
+      if (typeof d === 'function') effectsH.push(d)
+      return d
+    },
+    get: () => undefined,
+  }
+  ctxH.inject = (_deps, cb) => cb(ctxH)
+  ctxH.webServer = { register: () => () => {} }
+
+  try {
+    apply(ctxH, {
+      targetSessionId: 'session-stale',
+      statePath: statePathH,
+      debugTools: true,
+      onebotUrl: '',
+      wakeProbability: 0,
+      nicknames: ['244'],
+      whitelist: ['h-user'],
+      groupWhitelist: [],
+      napcatInstallDir: join(dir, 'no-napcat'),
+    })
+    const simH = toolsH.find((t) => t.name === 'qq_bridge_simulate')
+    const statusH = toolsH.find((t) => t.name === 'qq_bridge_status')
+    const handlesOf = async () => JSON.parse(await statusH.execute({})).resumedHandles
+    const wakeH = () => simH.execute({ text: '244 你好', userId: 'h-user', nickname: '群友' })
+
+    // ① 第一次唤醒：注册表里没有 → resume 建句柄 → 记进 handles，投给第 1 个 agent。
+    const r1 = JSON.parse(await wakeH())
+    check(
+      'S3：注册表为空时走 resume',
+      r1?.decision?.delivered === true && resumeCalls === 1,
+      JSON.stringify({ delivered: r1?.decision?.delivered, resumeCalls }),
+    )
+    check(
+      'S3：resume 出来的句柄记进台账（resumedHandles）',
+      JSON.stringify(await handlesOf()) === '["session-stale"]',
+      JSON.stringify(await handlesOf()),
+    )
+
+    // ② 会话在注册表里（活着）→ 直接用活 agent，不再 resume。
+    registry = mkAgent(99)
+    const r2 = JSON.parse(await wakeH())
+    check(
+      'S3：会话活着时直接用活 agent（不 resume）',
+      r2?.decision?.delivered === true && resumeCalls === 1 && deliveredTo[deliveredTo.length - 1] === 99,
+      JSON.stringify({ resumeCalls, deliveredTo }),
+    )
+
+    // ③ 会话被卸载（注册表里没了）→ 死句柄不能复用：必须 resume 并投给新 agent。
+    registry = null
+    const beforeCalls = resumeCalls
+    const warnedBefore = warningsH.length
+    const r3 = JSON.parse(await wakeH())
+    check(
+      'S3：句柄失效后下一次唤醒走 resume（不复用死句柄）',
+      r3?.decision?.delivered === true && resumeCalls === beforeCalls + 1,
+      JSON.stringify({ resumeCalls, deliveredTo }),
+    )
+    check(
+      'S3：新 agent 收到这一次投递（不是死句柄）',
+      deliveredTo[deliveredTo.length - 1] === resumeCalls && deliveredTo[deliveredTo.length - 2] === 99,
+      JSON.stringify(deliveredTo),
+    )
+    check(
+      'S3：句柄失效留下 warn（带会话 id，事后查得出）',
+      warningsH.slice(warnedBefore).some((w) => String(w).includes('session-stale')),
+      JSON.stringify(warningsH.slice(warnedBefore)),
+    )
+
+    // ④ 回归：插件卸载时必须清空 handles。
+    check('S3：卸载之前 handles 里还有条目', (await handlesOf()).length === 1, JSON.stringify(await handlesOf()))
+    for (const dispose of effectsH) {
+      try {
+        dispose()
+      } catch {
+        // 忽略
+      }
+    }
+    check('S3：插件卸载后 handles 被清空', JSON.stringify(await handlesOf()) === '[]', JSON.stringify(await handlesOf()))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ★ M5：群聊判据用 groupId，不用 groupName —— `get_group_info` 失败时群名是空的，
+//   按群名判会把群消息标成“[QQ · 私聊]”，模型就当成私聊来回答。
+{
+  const fire = (type, data) => handlers['session/event']({ id: 'session-smoke' }, { type, data })
+  const inboundLineOf = (msg) =>
+    String(msg?.content?.[0]?.text ?? '')
+      .split('\n')
+      .find((line) => line.startsWith('[QQ · ')) ?? ''
+  const prevGroupWhitelist = resolvedSettings.groupWhitelist
+  const prevWhitelist = resolvedSettings.whitelist
+  const prevAgent = fakeAgent
+  let injectedM5 = null
+  try {
+    fire('turn/end', { reason: { kind: 'completed' } })
+    // 群白名单按**群号**放行；消息不带 groupName（模拟取群名失败）。
+    resolvedSettings.groupWhitelist = ['12345678']
+    resolvedSettings.whitelist = ['test-user']
+    fakeAgent = {
+      id: 'session-smoke',
+      status: 'idle',
+      ctx: { get: () => undefined, effect: () => () => {} },
+      followup: (m) => {
+        injectedM5 = m
+      },
+    }
+    const rGroup = JSON.parse(
+      await sim.execute({ text: '244 在吗', userId: 'test-user', groupId: '12345678', nickname: '群友' }),
+    )
+    check('M5：有群号、无群名的群消息仍然唤醒', rGroup?.decision?.delivered === true, JSON.stringify(rGroup?.decision ?? rGroup))
+    const groupLine = inboundLineOf(injectedM5)
+    check('M5：无群名的群消息注入正文不含「私聊」', groupLine !== '' && !groupLine.includes('私聊'), JSON.stringify(groupLine))
+    check('M5：无群名的群消息注入正文带群聊标识（群号）', groupLine.includes('群 12345678'), JSON.stringify(groupLine))
+
+    // 无 groupId = 真私聊 → 照旧写“私聊”。
+    resolvedSettings.groupWhitelist = []
+    injectedM5 = null
+    const rPrivate = JSON.parse(await sim.execute({ text: '244 在吗', userId: 'test-user', nickname: '群友' }))
+    const privateLine = inboundLineOf(injectedM5)
+    check(
+      'M5：私聊（无 groupId）注入正文仍然写「私聊」',
+      rPrivate?.decision?.delivered === true && privateLine.includes('私聊'),
+      JSON.stringify(privateLine),
+    )
+  } finally {
+    if (prevGroupWhitelist === undefined) delete resolvedSettings.groupWhitelist
+    else resolvedSettings.groupWhitelist = prevGroupWhitelist
+    if (prevWhitelist === undefined) delete resolvedSettings.whitelist
+    else resolvedSettings.whitelist = prevWhitelist
+    fakeAgent = prevAgent
     fire('turn/end', { reason: { kind: 'completed' } })
   }
 }
