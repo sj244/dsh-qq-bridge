@@ -439,30 +439,7 @@ const outText = (first?.params?.message ?? []).map((s) => s.data?.text ?? '').jo
 check('只发标记块内的内容', !outText.includes('技术细节') && !outText.includes('废话'), outText)
 check('Markdown 标记已去除', !outText.includes('**') && outText.includes('你好'), outText)
 
-// 8) 长回复按 replyMaxChars 分段
-// 注意：插件对 replyMaxChars 有下限保护（readSettings 里 Math.max(100, …)），
-// 所以这里取 100，而不是更小的值。
-state.resolvedSettings.replyMaxChars = 100
-mock.actions.length = 0
-const longText = Array.from({ length: 20 }, (_, i) => `第${i + 1}行内容`).join('\n')
-asQQTurn()
-onSessionEvent(
-  { id: 'session-target' },
-  { type: 'assistant/message', seq: 5, time: Date.now(), data: { turn: 3, step: 1, message: { content: [{ type: 'text', text: `[QQ]${longText}[/QQ]` }] } } },
-)
-onSessionEvent(
-  { id: 'session-target' },
-  { type: 'turn/end', seq: 6, time: Date.now(), data: { turn: 3, reason: { kind: 'completed' } } },
-)
-await waitFor(() => mock.actions.filter((a) => a.action === 'send_private_msg').length >= 2)
-const chunks = mock.actions.filter((a) => a.action === 'send_private_msg')
-check('长回复被分段', chunks.length >= 2, `段数=${chunks.length}`)
-check(
-  '每段不超过 replyMaxChars',
-  chunks.every((c) => (c.params.message ?? []).reduce((n, s) => n + [...(s.data?.text ?? '')].length, 0) <= 100),
-)
-
-// 9) replyWithQuote：首段带 reply 段，引用触发那条消息（群消息 556 是最后一次带 id 的入站）
+// 8) replyWithQuote：首段带 reply 段，引用触发那条消息（群消息 556 是最后一次带 id 的入站）
 state.resolvedSettings.replyWithQuote = true
 mock.actions.length = 0
 asQQTurn()

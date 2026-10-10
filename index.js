@@ -8,7 +8,7 @@
 //
 // M1：以上全部 + 出站文本采集 + 调试工具。
 // M2：OneBot 传输层（见 onebot.js）——WS 入站映射到 handleInbound()，
-//     出站文本按 replyMaxChars 分段发给「最后一次入站的目的地」。
+//     出站文本超过 replyMaxChars 就拒绝发送；未超长才发给最后一次入站的目的地。
 //     传输细节（内置 WebSocket、token 走查询串、退避重连）全部封装在 onebot.js。
 
 import { spawn } from 'node:child_process'
@@ -155,7 +155,7 @@ const BridgeSettings = Schema.object({
   groupWhitelist: Schema.array(Schema.string()).default([]).description('允许唤醒的**群**号；空 = 任何群都不唤醒。'),
   attachRecentChat: Schema.boolean().default(true).description('唤醒时，是否把"未唤醒期间"的聊天记录一并附上。'),
   recentChatLimit: Schema.number().default(DEFAULT_RECENT_CHAT_LIMIT).description('上面那段摘要最多带最近几条（0–200）。'),
-  replyMaxChars: Schema.number().default(1500).description('单条出站消息的字数上限（下限 100）；超长自动分段发送。'),
+  replyMaxChars: Schema.number().default(1500).description('出站文本的字数上限（下限 100）；超过就不发送，请缩短后重发。'),
   // M2
   onebotUrl: Schema.string().default('').description('NapCat 的正向 WS 地址，如 ws://127.0.0.1:3001；留空 = 完全不启用传输。'),
   accessTokenEnv: Schema.string().default('').role('credential-ref').description('access_token 所在的**凭据引用名**（环境变量名）；别写明文 token。'),
@@ -1443,46 +1443,12 @@ export function apply(ctx, config) {
       .trim()
   }
 
-  /** 按码点切分（不会切坏 emoji 代理对），优先在换行处断，每段不超过 limit。 */
-  function chunkText(text, limit) {
-    const body = String(text)
-    if (body === '') return []
-    const chunks = []
-    let current = []
-    let currentLen = 0
-    const flush = () => {
-      if (current.length > 0) {
-        chunks.push(current.join('\n'))
-        current = []
-        currentLen = 0
-      }
-    }
-
-    for (const line of body.split('\n')) {
-      const chars = [...line]
-      if (chars.length > limit) {
-        // 单行超长：先落掉已攒的，再硬切。
-        flush()
-        let rest = chars
-        while (rest.length > limit) {
-          chunks.push(rest.slice(0, limit).join(''))
-          rest = rest.slice(limit)
-        }
-        current = [rest.join('')]
-        currentLen = rest.length
-        continue
-      }
-      if (current.length > 0 && currentLen + 1 + chars.length > limit) flush()
-      current.push(line)
-      currentLen = current.length === 1 ? chars.length : currentLen + 1 + chars.length
-    }
-    flush()
-    return chunks
-  }
-
   /**
    * 出站：把目标会话的回复发给「最后一次入站的目的地」。
    * M2 之前这里只是打日志的桩。
+   *
+   * 超长文本**一条都不发**：QQ 不该发长消息，所以只把拒绝结果回给调用方
+   * （`reason: 'too-long'`），由模型缩短后重发。
    */
   async function sendToQQ(text, destination) {
     const s = readSettings()
@@ -1499,25 +1465,27 @@ export function apply(ctx, config) {
     const body = s.stripMarkdown ? stripMarkdown(text) : String(text)
     if (body === '') return { sent: 0, dropped: true, reason: 'empty' }
 
-    const chunks = chunkText(body, s.replyMaxChars)
-    let sent = 0
-    for (const [index, chunk] of chunks.entries()) {
-      const segments = []
-      // 引用只在第一段带上，避免每段都引用同一条。
-      if (s.replyWithQuote && index === 0 && state.lastMessageId) {
-        segments.push({ type: 'reply', data: { id: String(state.lastMessageId) } })
-      }
-      segments.push({ type: 'text', data: { text: chunk } })
-
-      if (dest.kind === 'group') {
-        await transport.call('send_group_msg', { group_id: dest.groupId, message: segments })
-      } else {
-        await transport.call('send_private_msg', { user_id: dest.userId, message: segments })
-      }
-      sent += 1
+    // 判据用**去完 Markdown 之后**的字数（按码点算，emoji 计 1 个字），
+    // 跟真正会出现在群里的字一致。
+    const length = [...body].length
+    if (length > s.replyMaxChars) {
+      logger.warn(`outbound dropped: too-long (${length} > ${s.replyMaxChars})`)
+      return { sent: 0, dropped: true, reason: 'too-long', limit: s.replyMaxChars, length }
     }
-    logger.info(`sent ${sent} message(s) to ${dest.kind}:${dest.groupId ?? dest.userId}`)
-    return { sent, dropped: false, destination: dest }
+
+    const segments = []
+    if (s.replyWithQuote && state.lastMessageId) {
+      segments.push({ type: 'reply', data: { id: String(state.lastMessageId) } })
+    }
+    segments.push({ type: 'text', data: { text: body } })
+
+    if (dest.kind === 'group') {
+      await transport.call('send_group_msg', { group_id: dest.groupId, message: segments })
+    } else {
+      await transport.call('send_private_msg', { user_id: dest.userId, message: segments })
+    }
+    logger.info(`sent 1 message to ${dest.kind}:${dest.groupId ?? dest.userId}`)
+    return { sent: 1, dropped: false, destination: dest }
   }
 
   // 传输生命周期：建连、随插件卸载回收；settings 改了地址/token 就重连。
@@ -1752,22 +1720,35 @@ export function apply(ctx, config) {
         return
       }
 
-      recordOutbox({
-        sessionId: session.id,
-        via: s.replyMode === 'always' ? 'always' : 'marker',
-        endReason: kind,
-        text,
-      })
-      sendToQQ(text).catch((e) => logger.warn(`sendToQQ failed: ${e?.message ?? e}`))
+      // 只有真正发出去的消息才落台账。
+      // 被拒绝的（含超长）不记，否则台账里会多出一条 QQ 里根本没有的消息。
+      sendToQQ(text)
+        .then((result) => {
+          if (result?.dropped) {
+            const detail = result.reason === 'too-long' ? `（${result.length} 字 > 上限 ${result.limit} 字）` : ''
+            logger.warn(`标记块未发出：reason=${result.reason}${detail}`)
+            return
+          }
+          recordOutbox({
+            sessionId: session.id,
+            via: s.replyMode === 'always' ? 'always' : 'marker',
+            endReason: kind,
+            text,
+          })
+        })
+        .catch((e) => logger.warn(`sendToQQ failed: ${e?.message ?? e}`))
     }
   }))
 
   /**
    * 记一条「真的发到 QQ 了」的台账。
    *
-   * 为什么要记：出站有**两条**路 —— ① 每轮结束时的标记块闸门，② `qq_bridge_send` 工具（刻意绕过闸门）。
-   * 只记第①条的话，「群里冒出消息了，是漏了还是有人故意发的？」就答不上来。
-   * 所以两条路都落进同一个 outbox，并用 `via` 标出来源（marker / always / tool）。
+   * 为什么要记：出站有 2 条路 —— ① 每轮结束时的标记块闸门，② `qq_bridge_send` 工具（刻意绕过闸门）。
+   * 只记第 1 条的话，「群里冒出消息了，是漏了还是有人故意发的？」就答不上来。
+   * 所以 2 条路都落进同一个 outbox，并用 `via` 标出来源（marker / always / tool）。
+   *
+   * 被拒绝的发送（`dropped: true`）不落台账，只写 warn 日志。
+   * 台账与 QQ 里的实际消息一一对应，事后不会对不上账。
    */
   function recordOutbox(entry) {
     state.outbox.push({ at: Date.now(), ...entry, text: String(entry.text ?? '').slice(0, 4000) })
@@ -1915,7 +1896,8 @@ export function apply(ctx, config) {
   // 两道保险：
   //   ① **来源闸门**：只有「被 QQ 唤醒的那一轮」才发得出去。在 DSH 界面里直接对话时调用会被
   //      拒绝，并把原因回给模型 —— 这正是标记块模式缺的那个反馈回路（用户报的"分不清在哪"）；
-  //   ② 每次调用（含被拒绝的**不**记）都落 outbox（via: 'tool'），事后能从 status 查到。
+  //   ② 每次成功发送都落 outbox（via: 'tool'），事后能从 status 查到。
+  //      没发出去的（被闸门拒绝、超长）不落台账。
   // `qq_bridge_send` 与 `qq_bridge_sticker` 共用这一道闸门：
   //   ① 被 QQ 唤醒的那一轮 → 放行（返回 null）；
   //   ② 不是 QQ 唤醒的那一轮 → 第一次调用只回一句"确认要发吗"（**一个字都不发**），
@@ -1944,9 +1926,10 @@ export function apply(ctx, config) {
       '**只有被 QQ 唤醒的那一轮才直接发得出去**：在 DSH 界面里直接对话时，第一次调用只会回一句' +
       '"本轮不是 QQ 发起的，确认要发吗"，同一轮里再调一次才真的发出去。' +
       'replyMode=tool 时这是唯一的出站方式；marker 模式下它是「直接发这一条」的旁路。' +
+      '文本超过出站字数上限时**一条都不发**，返回 `reason: "too-long"` 与 `limit`、`length` —— 请缩短后重发。' +
       '发出去的内容会记进 outbox（via: tool）。',
     parameters: {
-      text: { type: 'string', required: true, description: '要发送的文本。' },
+      text: { type: 'string', required: true, description: '要发送的文本；超过出站字数上限时不会发出。' },
       userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用最后一次入站目的地。' },
       groupId: { type: 'string', description: '群号；与 userId 二选一。' },
     },
@@ -1965,14 +1948,17 @@ export function apply(ctx, config) {
           : undefined
       try {
         const result = await sendToQQ(args.text, dest)
-        recordOutbox({
-          sessionId: 'tool:qq_bridge_send',
-          via: 'tool',
-          // 非 QQ 轮的"确认后发送"要在台账里留痕，事后一眼看出这不是 QQ 唤醒的那一轮发的。
-          nonQQTurn: !currentTurnFromQQ,
-          to: result?.destination ?? dest ?? state.lastDestination,
-          text: args.text,
-        })
+        // 只记真的发出去的：被拒绝的不落台账。
+        if (result?.sent > 0) {
+          recordOutbox({
+            sessionId: 'tool:qq_bridge_send',
+            via: 'tool',
+            // 非 QQ 轮的“确认后发送”要在台账里留痕，事后一眼看出这不是 QQ 唤醒的那一轮发的。
+            nonQQTurn: !currentTurnFromQQ,
+            to: result?.destination ?? dest ?? state.lastDestination,
+            text: args.text,
+          })
+        }
         return JSON.stringify(result, null, 2)
       } catch (error) {
         return JSON.stringify({ error: error?.message ?? String(error) }, null, 2)
@@ -2708,7 +2694,7 @@ export function buildUsagePrompt(s = {}) {
     '  想展开的东西留在 DSH 里，群里只给结论 —— 长回复在群里读起来就是刷屏（用户先后提过三次）。',
     '- 不放文件路径、代码、日志、命令、配置值、提交号、调试结论，也不写"我正在做什么"的过程汇报。',
     '- 不确定就说不知道，别假装做过某件事。',
-    `- 出站会自动去掉 Markdown 记号；超过 ${maxChars} 字会被截断。`,
+    `- 出站会自动去掉 Markdown 记号；超过 ${maxChars} 字的回复不会发出，请缩短后重发。`,
     '',
     '【无人值守：不要碰特权操作】',
     '- 在 QQ 这头你是**无人值守**的：那一边没有人能替你点「同意」。审批策略是 ask，',

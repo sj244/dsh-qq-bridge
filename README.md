@@ -207,7 +207,8 @@ QQ 路径与 `NapCatWinBootHook.dll`；此时 QQ 路径取不到会明确报错�
   “确认要发吗”，不发送任何内容；同一轮里再调一次才真正发出。确认状态按轮清零，不跨轮保留。
 - **台账**：标记块发送记 `via: 'marker' | 'always'`，工具发送记 `via: 'tool'`，
   非 QQ 轮的确认发送额外标 `nonQQTurn: true`。据此可以查到每条群消息的发送方式。
-- **格式化**：按 `replyMaxChars` 分段；`replyWithQuote: true` 时首段带引用；
+- **字数上限**：出站文本超过 `replyMaxChars` 时**一条都不发**，调用方拿到 `reason: 'too-long'`，
+  应按提示缩短后重发；未超长时 `replyWithQuote: true` 让消息带上引用；
   `stripMarkdown: true`（默认）时先去掉 Markdown 标记（QQ 不渲染）。
 - **连不上或还没有目的地时丢弃并记日志**，不静默排队堆积。
 - 入站消息会自动附一行提示，说明目标会话的回复方式。
@@ -336,7 +337,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `targetSessionId` | — | 固定目标会话 id |
+| `targetSessionId` | `''` | 固定目标会话 id；**空 = 不驱动任何会话** |
 | `nicknames` | `['244','猫猫']` | 命中即唤醒 |
 | `wakeProbability` | `0.05` | 非昵称消息唤醒概率 |
 | `whitelist` / `groupWhitelist` | `[]` | 私聊 / 群白名单（**空 = 任何来源都不能唤醒**） |
@@ -344,7 +345,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `atOnlyInGroup` | `false` | 群里只有被 @ 才处理 |
 | `replyMode` | `'marker'` | 出站方式开关：`marker` ｜ `tool` ｜ `always` |
 | `delivery` | `'auto'` | 投递方式：`auto`（忙则插话）｜ `followup` ｜ `steer` |
-| `replyMaxChars` | `1500` | 出站分段上限（下限 100） |
+| `replyMaxChars` | `1500` | 出站字数上限（下限 100）；**超过就不发送** |
 | `replyWithQuote` | `false` | 回复时引用触发的那条消息 |
 | `stripMarkdown` | `true` | 出站去掉 Markdown 标记 |
 | `visionModel` | `''` | 给图片写描述的多模态模型（`"provider/model"`）；空 = 自动查找 |

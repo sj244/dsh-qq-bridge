@@ -99,7 +99,7 @@ window.__ModuleLoader__.load({
         key: 'replyMaxChars',
         label: '出站字数上限',
         kind: 'number',
-        hint: '单条消息的字数上限，超长自动分段发送。',
+        hint: '出站文本的字数上限；超过就不发送，请缩短后重发。',
       },
       {
         key: 'onebotUrl',

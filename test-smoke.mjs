@@ -345,6 +345,74 @@ if (sim) {
   check('status 暴露 listening 字段', 'listening' in st)
 }
 
+// ── 主 ctx 的假 WebSocket（出站用例的前置条件）─────────────────────────────
+// 主 ctx 的 ctx.effect 是空实现，所以 transport.start() 从来不执行。
+// 改 recordOutbox() 之前，这些用例只查台账。台账当时无条件记录，
+// 所以每条出站都被判成“发出去”。实际全是 reason='not-connected' 被丢弃，
+// 一次真实出站都没发生过。这一段装假 WebSocket 补上真实链路。
+//
+// 假 WebSocket 之后**不还原**。文件后半段还有几段主 ctx 用例同样要真的发得出去。
+// 末尾 registered2 那段自己会保存与还原 globalThis.WebSocket，与这一段不冲突。
+const qqSockets = []
+{
+  // 假 WebSocket：构造后立刻算连上。send() 把帧收进 this.sent，再回一个成功 echo。
+  // 写法与文件末尾 registered2 那段一致。
+  globalThis.WebSocket = class {
+    constructor(url) {
+      this.url = url
+      this.readyState = 0
+      this.sent = []
+      this.onopen = this.onmessage = this.onclose = this.onerror = null
+      qqSockets.push(this)
+      setTimeout(() => {
+        this.readyState = 1
+        this.onopen?.({})
+      }, 0)
+    }
+    send(text) {
+      const msg = JSON.parse(String(text))
+      this.sent.push(msg)
+      const data = msg.action === 'get_login_info' ? { user_id: 10001, nickname: 'fake-bot' } : { message_id: 7001 }
+      setTimeout(() => {
+        this.onmessage?.({ data: JSON.stringify({ status: 'ok', retcode: 0, data, echo: msg.echo }) })
+      }, 0)
+    }
+    close() {
+      this.readyState = 3
+      this.onclose?.({ code: 1000 })
+    }
+  }
+  // 主 config 没有给 onebotUrl。传输要真有地址才建连，所以这里补一个。
+  resolvedSettings.onebotUrl = 'ws://127.0.0.1:3001/'
+  // reconnectNow() 是主 ctx 里唯一能启动传输的口子（start() 挂在空 effect 上）。
+  await registered.find((t) => t.name === 'qq_bridge_transport').execute({ action: 'reconnect' })
+  // 等 onopen 与 get_login_info 走完。这之后 transport.isOpen() 才是 true。
+  await new Promise((r) => setTimeout(r, 20))
+  check('主 ctx：传输真的连上了（transport.state 为 open）', JSON.parse(await status.execute({})).transport.state === 'open')
+}
+
+/** 真实出站的文本帧：取 send_group_msg / send_private_msg 里的 text 段，按发送顺序拼好。 */
+function sentTexts() {
+  const out = []
+  for (const s of qqSockets) {
+    for (const frame of s.sent ?? []) {
+      if (frame.action !== 'send_group_msg' && frame.action !== 'send_private_msg') continue
+      const segs = Array.isArray(frame.params?.message) ? frame.params.message : []
+      out.push(segs.filter((x) => x?.type === 'text').map((x) => String(x.data?.text ?? '')).join(''))
+    }
+  }
+  return out
+}
+/** 最后一条真实出站文本。没有任何出站时返回空串。 */
+function lastSentText() {
+  const a = sentTexts()
+  return a.length > 0 ? a[a.length - 1] : ''
+}
+/** 真实出站里有没有一条包含 s。 */
+function sawSentText(s) {
+  return sentTexts().some((t) => t.includes(s))
+}
+
 // 出站闸门必须看**来源**：只有「QQ 唤醒的那一轮」才允许出站。
 // 用户 2026-09-30 报的：「agent 分不清是在 QQ 还是 DSH 里」—— 用法说明是常驻系统提示，
 // DSH 界面里的那一轮模型同样看得到标记块规矩，所以闸门不能只看"有没有标记块"。
@@ -353,10 +421,17 @@ if (sim) {
   const outbox = async () => JSON.parse(await status.execute({})).recentOutbox
   // ⚠️ status 只暴露 outbox 最后 3 条 —— 断言一律看**最新那条的内容**，不要比长度
   //（长度比到 3 就永远相等，那种断言是"碰巧通过"）。
-  const lastText = (a) => String(a[a.length - 1]?.text ?? '')
+  // outbox 现在只是**辅助口径**：主判据一律落在 sentTexts() 拿到的真实出站帧上。
   const sawText = (a, s) => a.some((o) => String(o.text ?? '').includes(s))
   const reply = (text) => fire('assistant/message', { message: { content: [{ type: 'text', text }] } })
   const end = () => fire('turn/end', { reason: { kind: 'completed' } })
+  // 标记块的出站是异步的：sendToQQ() 要等 transport.call() 的 echo 回包。
+  // turn/end 之后立刻查会看不到，所以断言前必须过一个宏任务。
+  const tick = (ms = 15) => new Promise((r) => setTimeout(r, ms))
+  const endA = async () => {
+    end()
+    await tick()
+  }
   // ⚠️ 现在闸门是**按轮快照**的：currentTurnFromQQ 在 turn/start 时从 pendingFromQQ 取。
   // 所以每条场景都要先 fire turn/start（真实链路里 turn/start 一定在 assistant/message 之前）。
   const start = () => fire('turn/start', { turn: 1 })
@@ -365,35 +440,39 @@ if (sim) {
   fire('user/message', { source: { kind: 'user' } })
   start()
   reply('[QQ]DSH 里聊出来的标记块不该进群[/QQ]')
-  end()
-  check('DSH 触发的轮次：标记块不出站', !sawText(await outbox(), 'DSH 里聊出来的标记块'))
+  await endA()
+  check(
+    'DSH 触发的轮次：标记块不出站',
+    !sawSentText('DSH 里聊出来的标记块') && !sawText(await outbox(), 'DSH 里聊出来的标记块'),
+  )
 
   // B) QQ 注入的那一轮：正常出站
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   start()
   reply('这段只给 DSH 看\n[QQ]群里看到这句[/QQ]')
-  end()
-  check('QQ 触发的轮次：正常出站且只取块内', lastText(await outbox()) === '群里看到这句', lastText(await outbox()))
+  await endA()
+  // 判据换成真实出站帧：这一条必须是 socket 上真发出去的 send_private_msg。
+  check('QQ 触发的轮次：正常出站且只取块内', lastSentText() === '群里看到这句', JSON.stringify(sentTexts()))
 
   // C) 工具结果也是 user/message，不能把「这轮来自 QQ」冲掉
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   start()
   fire('user/message', { source: { kind: 'tool' } })
   reply('[QQ]工具跑完后的回复[/QQ]')
-  end()
-  check('工具结果不会冲掉「来自 QQ」的标记', lastText(await outbox()) === '工具跑完后的回复', lastText(await outbox()))
+  await endA()
+  check('工具结果不会冲掉「来自 QQ」的标记', lastSentText() === '工具跑完后的回复', JSON.stringify(sentTexts()))
 
   // D) 别的插件（cron / goal / 别人）注入的轮次同样不出站
   fire('user/message', { source: { kind: 'plugin', plugin: 'dsh-cron' } })
   start()
   reply('[QQ]cron 那一轮[/QQ]')
-  end()
-  check('别的插件触发的轮次也不出站', !sawText(await outbox(), 'cron 那一轮'))
+  await endA()
+  check('别的插件触发的轮次也不出站', !sawSentText('cron 那一轮') && !sawText(await outbox(), 'cron 那一轮'))
 
   // E) 没有 user/message 直接 turn/end（冷启动等）→ fail-closed
   reply('[QQ]没有来源信息[/QQ]')
-  end()
-  check('没有来源信息时 fail-closed', !sawText(await outbox(), '没有来源信息'))
+  await endA()
+  check('没有来源信息时 fail-closed', !sawSentText('没有来源信息') && !sawText(await outbox(), '没有来源信息'))
 
   // G) **口子①回归**（复查时发现的）：QQ 那一轮还在跑，中途 DSH 里又来了一句
   //    → 那一轮仍然是 QQ 轮，工具/标记块该发就发（单一标时代这里会哑火）。
@@ -401,8 +480,8 @@ if (sim) {
   start()
   fire('user/message', { source: { kind: 'user' } }) // 中途插进来的 DSH 消息
   reply('[QQ]这一轮仍然是 QQ 轮，必须发出去[/QQ]')
-  end()
-  check('口子①：轮内插入 DSH 消息不导致哑火', lastText(await outbox()) === '这一轮仍然是 QQ 轮，必须发出去', lastText(await outbox()))
+  await endA()
+  check('口子①：轮内插入 DSH 消息不导致哑火', lastSentText() === '这一轮仍然是 QQ 轮，必须发出去', JSON.stringify(sentTexts()))
 
   // H) **口子②回归**：DSH 那一轮还在跑，中途群里来了 QQ 消息
   //    → 这一轮不是 QQ 轮，一个字都不许发；但**下一条**消息起的那轮才是 QQ 轮。
@@ -410,18 +489,22 @@ if (sim) {
   start()
   fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
   reply('[QQ]DSH 那一轮不许发[/QQ]')
-  end()
-  check('口子②：DSH 轮内来的 QQ 消息不会让它误发', !sawText(await outbox(), 'DSH 那一轮不许发'), lastText(await outbox()))
+  await endA()
+  check(
+    '口子②：DSH 轮内来的 QQ 消息不会让它误发',
+    !sawSentText('DSH 那一轮不许发') && !sawText(await outbox(), 'DSH 那一轮不许发'),
+    JSON.stringify(sentTexts()),
+  )
   start()
   reply('[QQ]下一条消息起的那轮才是 QQ 轮[/QQ]')
-  end()
-  check('口子②：QQ 消息确实认领了它的下一轮', lastText(await outbox()) === '下一条消息起的那轮才是 QQ 轮', lastText(await outbox()))
+  await endA()
+  check('口子②：QQ 消息确实认领了它的下一轮', lastSentText() === '下一条消息起的那轮才是 QQ 轮', JSON.stringify(sentTexts()))
 
   // I) 多轮延续（同一轮没有新的用户消息）：仍然是 QQ 轮 —— 别因为"turn/end 消费掉了"就哑火
   start()
   reply('[QQ]第二轮延续也发得出去[/QQ]')
-  end()
-  check('多轮延续保持 QQ 轮（turn/end 不吞掉归属）', lastText(await outbox()) === '第二轮延续也发得出去', lastText(await outbox()))
+  await endA()
+  check('多轮延续保持 QQ 轮（turn/end 不吞掉归属）', lastSentText() === '第二轮延续也发得出去', JSON.stringify(sentTexts()))
 
   // J) **哑火第 3 次回归（真机实测抓到的那条）**：QQ 消息之后紧跟一条 harness 注入的上下文
   //    （`@deepseek-ai/dsh-system-prompt` 发的 "Current runtime context…"，它同样走
@@ -434,8 +517,8 @@ if (sim) {
   })
   start()
   reply('[QQ]harness 上下文不该抢走这一轮[/QQ]')
-  end()
-  check('哑火③回归：harness 注入的上下文不影响本轮归属', lastText(await outbox()) === 'harness 上下文不该抢走这一轮', lastText(await outbox()))
+  await endA()
+  check('哑火③回归：harness 注入的上下文不影响本轮归属', lastSentText() === 'harness 上下文不该抢走这一轮', JSON.stringify(sentTexts()))
 
   // 但 **harness 上下文不足以认领一轮**：先由真人消息把 pending 打成 false，
   // 再来一条 harness 上下文 —— 它既不能打掉真归属（上面 J），也不能把归属抬起来。
@@ -443,8 +526,12 @@ if (sim) {
   fire('user/message', { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' } })
   start()
   reply('[QQ]只有 harness 上下文的一轮不该出站[/QQ]')
-  end()
-  check('harness 上下文不足以认领一轮', !sawText(await outbox(), '只有 harness 上下文的一轮'), lastText(await outbox()))
+  await endA()
+  check(
+    'harness 上下文不足以认领一轮',
+    !sawSentText('只有 harness 上下文的一轮') && !sawText(await outbox(), '只有 harness 上下文的一轮'),
+    JSON.stringify(sentTexts()),
+  )
 
   // F) **真机哑火回归**：source 被上游重写成 'user'，但正文就是我们注入的 QQ 入站消息
   //    → 必须仍然按「QQ 唤醒的那一轮」算，否则就是"用户明明用 QQ @ 了却发不出去"。
@@ -457,8 +544,8 @@ if (sim) {
   })
   start()
   reply('[QQ]回归通过[/QQ]')
-  end()
-  check('回归：source 被改写成 user 也不哑火（按正文前缀认出来）', lastText(await outbox()) === '回归通过', lastText(await outbox()))
+  await endA()
+  check('回归：source 被改写成 user 也不哑火（按正文前缀认出来）', lastSentText() === '回归通过', JSON.stringify(sentTexts()))
 
   // 排障入口：status 里要能看到最近观测到的 user/message（哑火时看 ours 是不是 false）
   const st2 = JSON.parse(await status.execute({}))
@@ -497,7 +584,11 @@ if (sim) {
     '用法说明：监听模式用法（开窗 / 上限 / 关窗 / 别无脑常开）',
     p.includes('qq_bridge_listen') && p.includes('off: true') && p.includes('60 分钟') && p.includes('别无脑常开'),
   )
-  check('用法说明：截断阈值跟着 replyMaxChars 走', p.includes('1200 字'), p.slice(0, 80))
+  check(
+    '用法说明：超长阈值跟着 replyMaxChars 走，且写明不会发出',
+    p.includes('1200 字') && p.includes('不会发出') && p.includes('缩短后重发'),
+    p.slice(0, 80),
+  )
   check('用法说明：明确「回群只用标记块，别拿 send 工具当回复通道」', p.includes('qq_bridge_send') && p.includes('别拿它当回复通道'))
   check('用法说明：说明被戳会显示成「[戳一戳]（戳的是我）」', p.includes('[戳一戳]') && p.includes('戳的是我'))
   check('用法说明：发了表情包不要解释（人自己看得懂）', p.includes('不要解释') && p.includes('表情包'))
@@ -547,7 +638,7 @@ if (sim) {
   start()
   fire('assistant/message', { message: { content: [{ type: 'text', text: '[QQ]tool 模式下标记块应该无效[/QQ]' }] } })
   fire('turn/end', { reason: { kind: 'completed' } })
-  check('tool 模式：标记块不出站（开关把它关了）', !sawText(await outbox(), 'tool 模式下标记块应该无效'))
+  check('tool 模式：标记块不出站（开关把它关了）', !sawSentText('tool 模式下标记块应该无效') && !sawText(await outbox(), 'tool 模式下标记块应该无效'))
 
   // 工具在 DSH 轮里走**两步确认**：第一次只回问、一个字都不发；同一轮里再调一次才真的发。
   // （2026-10-01 用户提议：硬拒绝太死，改成"确认后再发" —— 能力不丢，误发依然要跨一道有意识的动作。）
@@ -559,11 +650,19 @@ if (sim) {
     asked.needsConfirm === true && asked.sent === 0 && String(asked.reason).includes('DSH'),
     JSON.stringify(asked),
   )
-  check('第一次调用不记 outbox', !sawText(await outbox(), '第一次不该发出去'))
+  check('第一次调用不记 outbox', !sawSentText('第一次不该发出去') && !sawText(await outbox(), '第一次不该发出去'))
   const confirmed = JSON.parse(await sendTool.execute({ text: '确认之后发出去' }))
-  check('工具：DSH 轮第二次调用真的发送', confirmed.refused !== true && lastText(await outbox()) === '确认之后发出去', JSON.stringify(confirmed))
+  check(
+    '工具：DSH 轮第二次调用真的发送',
+    confirmed.refused !== true && confirmed.sent === 1 && lastSentText() === '确认之后发出去' && lastText(await outbox()) === '确认之后发出去',
+    JSON.stringify(confirmed),
+  )
   const obNonQQ = await outbox()
-  check('非 QQ 轮的发送在 outbox 留痕（nonQQTurn）', obNonQQ[obNonQQ.length - 1]?.nonQQTurn === true, JSON.stringify(obNonQQ[obNonQQ.length - 1]))
+  check(
+    '非 QQ 轮的发送在 outbox 留痕（nonQQTurn）',
+    sawSentText('确认之后发出去') && obNonQQ[obNonQQ.length - 1]?.nonQQTurn === true,
+    JSON.stringify(obNonQQ[obNonQQ.length - 1]),
+  )
   fire('turn/end', { reason: { kind: 'completed' } })
 
   // 确认状态**不能跨轮泄漏**：新一轮的第一次调用必须重新回问
@@ -571,7 +670,7 @@ if (sim) {
   start()
   const again = JSON.parse(await sendTool.execute({ text: '新一轮第一次' }))
   check('确认状态不跨轮：新一轮第一次仍只回确认', again.needsConfirm === true, JSON.stringify(again))
-  check('跨轮也不该发出去', !sawText(await outbox(), '新一轮第一次'))
+  check('跨轮也不该发出去', !sawSentText('新一轮第一次') && !sawText(await outbox(), '新一轮第一次'))
   fire('turn/end', { reason: { kind: 'completed' } })
 
   // 工具在 QQ 轮里走通，并记 outbox（via: tool）
@@ -579,8 +678,16 @@ if (sim) {
   start()
   const sent = JSON.parse(await sendTool.execute({ text: '工具发出去的话' }))
   const ob = await outbox()
-  check('工具：QQ 轮里不再被拒（发送路径走通）', sent.refused !== true && lastText(ob) === '工具发出去的话', JSON.stringify(sent))
-  check('工具发送记进 outbox（via: tool）', ob[ob.length - 1]?.via === 'tool', JSON.stringify(ob[ob.length - 1]))
+  check(
+    '工具：QQ 轮里不再被拒（发送路径走通）',
+    sent.refused !== true && sent.sent === 1 && lastSentText() === '工具发出去的话' && lastText(ob) === '工具发出去的话',
+    JSON.stringify(sent),
+  )
+  check(
+    '工具发送记进 outbox（via: tool）',
+    sawSentText('工具发出去的话') && ob[ob.length - 1]?.via === 'tool',
+    JSON.stringify(ob[ob.length - 1]),
+  )
 
   // 复位，别影响后面的块
   resolvedSettings.replyMode = 'marker'
@@ -614,6 +721,10 @@ if (sim) {
 
   fire('turn/end', { reason: { kind: 'completed' } }) // 清掉前一块可能残留的轮
   resolvedSettings.replyMode = 'tool'
+  // 上一块的 settings/updated 发现了新的 onebotUrl → 调了 transport.reconnectNow()。
+  // 新 socket 的 onopen 走宏任务。这里不等它，工具就回到 reason='not-connected'。
+  await new Promise((r) => setTimeout(r, 20))
+  check('重连之后传输回到 open', JSON.parse(await status.execute({})).transport.state === 'open')
 
   let injected = null
   fakeAgent = {
@@ -637,7 +748,11 @@ if (sim) {
   check('同步 turn/start 的时序下归属正确（置位早于 send）', g.currentTurnFromQQ === true, JSON.stringify(g))
 
   const sent = JSON.parse(await sendTool.execute({ text: '端到端：这条应该发得出去' }))
-  check('端到端：注入之后工具可用', sent.refused !== true && lastText(await outbox()) === '端到端：这条应该发得出去', JSON.stringify(sent))
+  check(
+    '端到端：注入之后工具可用',
+    sent.refused !== true && sent.sent === 1 && lastSentText() === '端到端：这条应该发得出去' && lastText(await outbox()) === '端到端：这条应该发得出去',
+    JSON.stringify(sent),
+  )
 
   // ── 投递方式：目标正忙时该不该插话 ────────────────────────────────────────
   check(
@@ -1486,6 +1601,55 @@ if (sim) {
     check('send：hash 与 mood 都不给 → 清晰错误', neither.ok === false, JSON.stringify(neither))
     const bad = JSON.parse(await stickerTool.execute({ action: 'nonsense' }))
     check('未知 action → 错误而非抛异常', bad.ok === false && Array.isArray(bad.valid), JSON.stringify(bad))
+  }
+
+  // ★ 超长出站：一条都不发（不再分段），并且**不碰 transport**。
+  //   QQ 不该发长消息 —— 超长直接拒绝，让模型缩短后重发。
+  {
+    const sendTool2 = registered2.find((t) => t.name === 'qq_bridge_send')
+    const sim2 = registered2.find((t) => t.name === 'qq_bridge_simulate')
+    // 先记一个目的地：这条消息走 record 分支（不进白名单外的群），不会注入会话。
+    await sim2.execute({ text: '记一下目的地', userId: 'test-user' })
+    stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/start', data: { turn: 2 } })
+
+    // ① 工具通道：返回 too-long，且 sockets 里没有多出任何出站动作。
+    const longText = 'x'.repeat(2000)
+    const before = sockets.reduce((n, s) => n + s.sent.length, 0)
+    // 按**内容**判断，不按条数：recentOutbox 只留最后 3 条，条数会饱和。
+    const sawOutbox = async (needle) =>
+      JSON.parse(await status2.execute({})).recentOutbox.some((e) => String(e.text).includes(needle))
+    const tooLong = JSON.parse(await sendTool2.execute({ text: longText, groupId: '770156738' }))
+    const after = sockets.reduce((n, s) => n + s.sent.length, 0)
+    check(
+      '超长出站被拒：reason=too-long / sent=0 / 带 limit 与 length',
+      tooLong.reason === 'too-long' &&
+        tooLong.sent === 0 &&
+        tooLong.dropped === true &&
+        tooLong.limit > 0 &&
+        tooLong.length === longText.length,
+      JSON.stringify(tooLong),
+    )
+    check('超长出站不调用 transport（一条都不发）', after === before, `出站动作数 ${before} → ${after}`)
+    // 台账只记真的发出去的：被拒绝的不落 outbox，否则事后对不上账。
+    check('超长被拒不落 outbox（台账不记假账）', !(await sawOutbox('xxxx')), JSON.stringify(await status2.execute({})))
+
+    // ② 标记块通道：拒绝结果要进日志（能看出是超长被拒）。
+    const warned = warnings.length
+    stickerHandlers['session/event'](
+      { id: 'session-sticker' },
+      { type: 'assistant/message', data: { turn: 2, step: 1, message: { content: [{ type: 'text', text: `[QQ]${'y'.repeat(2000)}[/QQ]` }] } } },
+    )
+    stickerHandlers['session/event'](
+      { id: 'session-sticker' },
+      { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
+    )
+    await new Promise((r) => setTimeout(r, 10))
+    check(
+      '标记块超长被拒时日志里有 too-long',
+      warnings.slice(warned).some((w) => String(w).includes('too-long')),
+      JSON.stringify(warnings.slice(warned)),
+    )
+    check('标记块超长被拒也不落 outbox', !(await sawOutbox('yyyy')))
   }
 
   // 不受 debugTools 限制：关掉调试工具，表情包工具仍在

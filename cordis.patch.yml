@@ -6,7 +6,8 @@
       name: dsh-qq-bridge
       config:
         # 固定目标会话：QQ 的一切都注入这一个会话（保留其上下文）。
-        targetSessionId: '<TARGET_SESSION_ID>'
+        # 留空表示不驱动任何会话。
+        targetSessionId: ''
         # 可选：resume 目标会话时挂载的 agent preset（留空则沿用会话 header 里记录的）。
         agentPreset: ''
         # 状态文件（最近聊天缓冲 + 唤醒日志 + 出站目的地）。留空 = $DSH_HOME/qq-bridge-state.json
@@ -52,7 +53,7 @@
         nicknames: ['244', '猫猫']
         # 非昵称消息的唤醒概率（5%）
         wakeProbability: 0.05
-        # ⚠️ 白名单 fail-closed：空数组 = 谁都不能唤醒。
-        # 'test-user' 是自测用的假 id，正式使用请换成你自己的 QQ openid。
-        whitelist: ['test-user']
+        # ⚠️ 白名单 fail-closed：留空表示任何来源都不能唤醒会话。
+        # 正式使用时填入实际的 QQ openid。
+        whitelist: []
         groupWhitelist: []

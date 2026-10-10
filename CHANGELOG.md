@@ -2,8 +2,24 @@
 
 ## 未发布
 
+- **默认值修正**：`cordis.patch.yml` 里的 `targetSessionId` 与 `whitelist` 不再带占位值
+  （原来的 `'<TARGET_SESSION_ID>'` 与 `['test-user']`），两项都改为空。
+  空 `targetSessionId` = 不驱动任何会话；空 `whitelist` = fail-closed，任何来源都不能唤醒会话。
+  README 的设置项表同步了这一默认值。
+- **超长出站改为拒绝发送**：出站文本超过 `replyMaxChars` 时**一条都不发**，不再分段。
+  `sendToQQ()` 返回 `{ sent: 0, dropped: true, reason: 'too-long', limit, length }`。
+  删除了分段函数 `chunkText()` 与分段发送路径。拒绝原因会经 `qq_bridge_send` 的返回、
+  标记块模式的日志、用法说明与设置项说明传到模型侧，文案统一为“超过上限的回复不会发出，请缩短后重发”。
 - **表情包措辞更新**：用法说明里加一条：发了表情包不要解释它是什么意思（除非有人问）。
   人自己看得懂表情包，解释反而奇怪。
+- **出站台账只记真话**：`outbox` 只记录真正发出去的消息。
+  被拒绝的发送（超长、未连接、无目的地）不再落台账，只写 warn 日志。
+  原来的写法会让台账里出现 QQ 里根本没有的消息，事后对不上账。
+- **测试修复：出站用例改为看真实发送帧**（严重）：主 ctx 从未连上传输，
+  12 条出站用例靠假台账被误判为通过，实际每条都是 `reason: 'not-connected'`。
+  现在为主 ctx 装上能连上的假 WebSocket，判据改为 `send_group_msg` /
+  `send_private_msg` 帧里的文本。负面用例同时检查真实帧与台账 2 个口径。
+  新增 2 条断言钉住传输处于 `open`。测试总数 361 → 366。
 
 ## v0.1.2 — 2026-10-10
 
