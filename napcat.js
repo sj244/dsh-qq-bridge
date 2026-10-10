@@ -1,6 +1,6 @@
 // napcat.js — NapCat（OneBot 实现）的自助下载 / 校验 / 解包 / 配置 / 启停。
 //
-// 目标是"一键包的体验，但不真打包"：用户在会话里说一声，插件替他把 NapCat 弄好。
+// 目标是“一键包的体验，但不真打包”：用户在会话里说一声，插件替他把 NapCat 弄好。
 //
 // 设计约束（改之前先读）：
 //
@@ -194,7 +194,7 @@ export function pickAsset(assets, pattern = DEFAULT_ASSET) {
 // ── 下载（curl 优先，可带代理）───────────────────────────────────────────────
 
 /**
- * 造一个"取 JSON / 下文件"的小执行器。
+ * 造一个“取 JSON / 下文件”的小执行器。
  * - 有 subprocess 时用 curl.exe（可带代理；Windows 10+ 自带）
  * - 否则退回内置 fetch（不读代理环境变量）
  */
@@ -319,7 +319,7 @@ export async function downloadVerified({
 
 /**
  * 生成 NapCat 的 onebot11 默认配置（v4.5.3+ 支持 ./config/onebot11.json 作为默认配置）。
- * 插件用它在**用户点 WebUI 之前**就把正向 WS 服务端配好——这是"一键"的关键。
+ * 插件用它在**用户点 WebUI 之前**就把正向 WS 服务端配好——这是“一键”的关键。
  */
 export function oneBotConfig({ port = 3001, token = '', host = '127.0.0.1', name = 'dsh-qq-bridge' } = {}) {
   return {
@@ -434,7 +434,7 @@ function firstExisting(list) {
  *   - **NapCat.Shell 子目录**：用户把 `napcatInstallDir` 直接设成 `<installDir>/NapCat.Shell`。
  *
  * 因此每个位置都按候选顺序探测，**只取存在的那个**；都不存在时返回最可能的期望路径，
- * 让错误信息能写清"期望路径"。`launcherBat` 不存在时为空串。
+ * 让错误信息能写清“期望路径”。`launcherBat` 不存在时为空串。
  */
 export function napcatPaths(installDir) {
   // 先定 shellDir：OneKey 根下若真有 NapCat.Shell，官方 launcher 与 config 都在它里面。

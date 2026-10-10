@@ -382,9 +382,9 @@ check('记录不改动唤醒次数', state.followups.length === 2)
 const onSessionEvent = state.listeners.get('session/event')
 check('session/event 监听已注册', typeof onSessionEvent === 'function')
 
-// 出站闸门现在看**来源**、而且是**按轮快照**的：只有「QQ 唤醒的那一轮」才允许出站
+// 出站闸门现在看**来源**、而且是**按轮快照**的：只有“QQ 唤醒的那一轮”才允许出站
 // （index.js 的 pendingFromQQ / currentTurnFromQQ）。真实链路里这两条事件先于 assistant/message，
-// 这里手工补齐；否则 fire 出来的 assistant/message 会被正确地判成"不是 QQ 轮"而不发。
+// 这里手工补齐；否则 fire 出来的 assistant/message 会被正确地判成“不是 QQ 轮”而不发。
 const asQQTurn = () => {
   onSessionEvent(
     { id: 'session-target' },
@@ -494,7 +494,7 @@ check(
   check('摘要正文不超过 1200 字', !m || m[1].length <= 1200, m ? `${m[1].length} 字` : 'n/a')
 }
 
-// 9.7) **只 @ 一下、不带文字**：必须唤醒，不能被"文本为空"静默丢弃（真机踩过）
+// 9.7) **只 @ 一下、不带文字**：必须唤醒，不能被“文本为空”静默丢弃（真机踩过）
 {
   const beforeN = state.followups.length
   mock.sendEvent({

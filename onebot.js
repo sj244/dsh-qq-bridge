@@ -12,8 +12,8 @@
 //      **不支持自定义请求头**，所以没法像别的客户端那样发 `Authorization: Bearer`。
 //      OneBot 的 WS 服务端（NapCat / go-cqhttp）都支持 `?access_token=…`，走它。
 //
-//   3) **getUrl / getToken 传「函数」而不是值。**
-//      DSH 的凭据契约要求「每次操作重新解析、不得跨操作缓存」，这样轮换 token
+//   3) **getUrl / getToken 传“函数”而不是值。**
+//      DSH 的凭据契约要求“每次操作重新解析、不得跨操作缓存”，这样轮换 token
 //      不用重启进程。所以每次建连环都重新取一次。
 //
 //   4) **所有定时器都归 dispose() 管。**
@@ -104,7 +104,7 @@ export function createOneBotTransport(options) {
 
   function armWatchdog() {
     if (watchdogTimer !== null) return
-    // 用一个较长周期的 interval 检查「最近有没有流量」；OneBot 的 heartbeat
+    // 用一个较长周期的 interval 检查“最近有没有流量”；OneBot 的 heartbeat
     // 元事件默认 5s 一条，所以正常情况永远不会触发。
     const tick = Math.max(5000, Math.floor(heartbeatTimeoutMs / 3))
     watchdogTimer = setInterval(() => {
@@ -279,7 +279,7 @@ export function createOneBotTransport(options) {
 
     ws.onerror = () => {
       // WHATWG 的 error 事件不带细节；真正的诊断信息在随后的 close 事件里。
-      // 这里只记录「发生过错误」，绝不冒泡（插件 bug 不能弄崩宿主）。
+      // 这里只记录“发生过错误”，绝不冒泡（插件 bug 不能弄崩宿主）。
       if (socket !== ws) return
       status.lastError = status.lastError ?? 'websocket error'
     }
@@ -315,7 +315,7 @@ export function createOneBotTransport(options) {
 
   /**
    * 发一个 OneBot action 并等待 echo 回包。
-   * 未连接时抛错——上层据此决定「出站丢弃」还是「排队」。
+   * 未连接时抛错——上层据此决定“出站丢弃”还是“排队”。
    */
   function call(action, params = {}) {
     if (!isOpen()) return Promise.reject(new Error('OneBot transport is not connected'))

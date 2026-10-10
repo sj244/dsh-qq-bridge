@@ -380,7 +380,7 @@ check('包含匹配资产', pickAsset(assets, 'Framework').url === 'u1')
     check('混合布局：isNapcatInstalled = true', isNapcatInstalled(root) === true)
   }
 
-  // 造一个"已安装"的目录（配置与 bootmain 都在根下）
+  // 造一个“已安装”的目录（配置与 bootmain 都在根下）
   const fake = join(work, 'fake-install')
   writeOneBotConfig({ configDir: join(fake, 'config'), port: 1 })
   mkdirSync(join(fake, 'bootmain'), { recursive: true })

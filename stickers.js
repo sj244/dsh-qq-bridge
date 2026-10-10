@@ -1,6 +1,6 @@
 // stickers.js — 表情包登记表：纯函数 + 文件读写，导出以便测试。
 //
-// 登记表把「群里出现过的一张图」变成可复用的资产：
+// 登记表把“群里出现过的一张图”变成可复用的资产：
 //   * 图片本体复制到 `qq-bridge-stickers/<hash>.<ext>`；
 //   * 元数据（mood / description / 来源 / 发送次数）写在 `qq-bridge-stickers.json`。
 //
@@ -77,7 +77,7 @@ export function saveStickers(path, data) {
  * 重存同一张图只该换 mood 与描述，不该把累计发送次数清零。
  */
 export function upsertSticker(store, entry) {
-  // 就地改传进来的那个对象：调用方（宿主半）把它当"内存里的登记表"持有，
+  // 就地改传进来的那个对象：调用方（宿主半）把它当“内存里的登记表”持有，
   // 拿一份新对象回写会让它悄悄丢失这次登记。
   const s = store && typeof store === 'object' ? store : emptyStore()
   if (!s.stickers || typeof s.stickers !== 'object' || Array.isArray(s.stickers)) s.stickers = {}
@@ -131,7 +131,7 @@ export function findSticker(store, { hash, mood } = {}) {
  * 把一张本地图片收进登记表：算 hash → 按需复制进 destDir → 登记并返回条目。
  *
  * 源文件读不到时**抛错**（由调用方翻成一句给模型看的提示）。落盘由调用方负责
- * （宿主半统一 `saveStickers`），这样本函数保持"输入进、条目出"的纯形状。
+ * （宿主半统一 `saveStickers`），这样本函数保持“输入进、条目出”的纯形状。
  */
 export function importSticker({ store, srcPath, destDir, mood, description, source }) {
   const data = readFileSync(srcPath)
