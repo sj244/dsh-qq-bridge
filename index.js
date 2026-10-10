@@ -561,10 +561,17 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 追加一条台账，并返回推入的那个条目对象（`state.log` 里的引用）。
+   * 唤醒路径保留这个引用：投递失败时把 `decision` 就地改成 `wake-failed`，
+   * 不额外推一条占位记录。
+   */
   function pushLog(entry) {
-    state.log.push({ at: Date.now(), ...entry })
+    const pushed = { at: Date.now(), ...entry }
+    state.log.push(pushed)
     if (state.log.length > MAX_LOG) state.log = state.log.slice(-MAX_LOG)
     saveState()
+    return pushed
   }
 
   // ── 表情包登记表（与 settingsPath 同一取法：落在 statePath 所在目录）─────────
@@ -1142,7 +1149,8 @@ export function apply(ctx, config) {
   async function handleInbound(msg) {
     const s = readSettings()
     const d = decide(msg, s)
-    pushLog({ kind: 'inbound', decision: d.action, reason: d.reason, who: msg.userId, group: msg.groupId ?? null, text: String(msg.text ?? '').slice(0, 200) })
+    // 保留引用：唤醒失败时把这一条就地改成 `wake-failed`。修之前失败也写着 `wake`，事后查不出问题。
+    const inboundLog = pushLog({ kind: 'inbound', decision: d.action, reason: d.reason, who: msg.userId, group: msg.groupId ?? null, text: String(msg.text ?? '').slice(0, 200) })
 
     // 目的地无论是否唤醒都要记：这样「只记录」期间的闲聊之后也能被回复到。
     if (d.action !== 'drop') rememberDestination(msg)
@@ -1181,7 +1189,33 @@ export function apply(ctx, config) {
       return { ...d, delivered: false }
     }
 
-    const agent = await ensureTargetAgent()
+    // 唤醒失败必须能从事后排查里看出来：台账条目改成 `wake-failed`，调用方拿到
+    // `wakeFailed` / `error`，函数**不向上抛**。
+    // 投递前会置位三面闸门标志。投递失败时必须回滚到置位前的值，否则一次失败的唤醒
+    // 会污染下一轮的归属判定。`gateBeforeWake` 在置位点紧前面快照，两者之间没有 await。
+    // 失败路径在清缓冲之前返回，所以缓冲不丢。
+    let gateBeforeWake = null
+    const failWake = (error) => {
+      const reason = error?.message ?? String(error)
+      if (gateBeforeWake) {
+        pendingFromQQ = gateBeforeWake.pendingFromQQ
+        currentTurnFromQQ = gateBeforeWake.currentTurnFromQQ
+        claimedFromQQ = gateBeforeWake.claimedFromQQ
+      }
+      inboundLog.decision = 'wake-failed'
+      inboundLog.error = reason
+      saveState()
+      logger.warn(`唤醒失败（${d.reason}）：${reason}`)
+      return { ...d, delivered: false, wakeFailed: true, error: reason }
+    }
+
+    let agent
+    try {
+      agent = await ensureTargetAgent()
+    } catch (error) {
+      // 还没走到置位点，闸门标志本来就是“置位前的值”，不必回滚。
+      return failWake(error)
+    }
     const digest = renderDigest(s, bufferSnapshot)
     // 图片：缓冲里攒下的 + 本条消息的，一起下载成真正的附件。
 
@@ -1220,6 +1254,8 @@ export function apply(ctx, config) {
     // `turn/start` 当场就到达，而它会快照 pending/claim。晚一步置位 = "标还没立、轮已经开了"，
     // 整轮哑火。（2026-09-30 真机抓到的时序：gate = { pending: true, current: false,
     // turnActive: true, claimed: false } —— pending 对、current 错，就是置位晚了一拍的指纹。）
+    // 置位之前快照这三面闸门标志：投递失败时按它回滚（见上面的 failWake）。
+    gateBeforeWake = { pendingFromQQ, currentTurnFromQQ, claimedFromQQ }
     pendingFromQQ = true
     // 没有正在跑的轮就顺手认领这一轮（会观察到 turn/start）；有正在跑的轮则不能改它。
     if (!turnActive) {
@@ -1234,10 +1270,18 @@ export function apply(ctx, config) {
       if (wantSteer && typeof agent.steer === 'function') return agent.steer(injected)
       return agent.followup(injected)
     }
+    // withInitiator 抛错时改调 send()。那一次 send() 再抛也不能逃出本函数。
+    const deliver = () => {
+      try {
+        ctx.agents.withInitiator(agent, send)
+      } catch {
+        send()
+      }
+    }
     try {
-      ctx.agents.withInitiator(agent, send)
-    } catch {
-      send()
+      deliver()
+    } catch (error) {
+      return failWake(error)
     }
     logger.info(`已投递 QQ 消息（${wantSteer ? 'steer 插话' : 'followup 排队'}${running ? '，目标正忙' : ''}）`)
     // 只移除**确实进了这次摘要**的那些条目（按对象身份），

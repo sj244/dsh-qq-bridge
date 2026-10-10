@@ -2,6 +2,17 @@
 
 ## 未发布
 
+- **唤醒失败不再记账为成功**（严重）：`handleInbound()` 先前在 `d.action === 'wake'` 时就写了
+  `decision: 'wake'` 的台账，之后 `ensureTargetAgent()` 抛错（未配置 `targetSessionId`、resume 失败）
+  或投递抛错（`followup` / `steer` 抛错，含 `withInitiator` 失败后那次 `send()` 再抛）都会异常退出，
+  台账里留下的仍是 `wake` —— 事后查 `status.recentLog` 看不出失败。
+  现在 `pushLog()` 返回推入的条目对象，唤醒路径保留引用：投递失败时把 `decision` 就地改成
+  `wake-failed` 并加上 `error`；`handleInbound()` 返回
+  `{ ...d, delivered: false, wakeFailed: true, error }`，不向上抛，`action` 仍为 `wake`。
+  失败时同时回滚 `pendingFromQQ` / `currentTurnFromQQ` / `claimedFromQQ` 到置位前的值
+  （失败的唤醒不再污染下一轮的归属判定）。投递失败时不进入清缓冲那一步，
+  失败的消息留在缓冲里，下次唤醒还能带上。
+  测试新增 18 条断言覆盖这 3 个失败点、回滚与缓冲。测试总数 366 → 384。
 - **默认值修正**：`cordis.patch.yml` 里的 `targetSessionId` 与 `whitelist` 不再带占位值
   （原来的 `'<TARGET_SESSION_ID>'` 与 `['test-user']`），两项都改为空。
   空 `targetSessionId` = 不驱动任何会话；空 `whitelist` = fail-closed，任何来源都不能唤醒会话。

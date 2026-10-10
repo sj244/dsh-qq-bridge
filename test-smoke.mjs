@@ -814,6 +814,143 @@ function sawSentText(s) {
   fire('turn/end', { reason: { kind: 'completed' } })
 }
 
+// ★ 唤醒失败必须能事后看出：台账改成 wake-failed，调用方拿到 wakeFailed，闸门标志回滚，缓冲不丢。
+//   修之前投递失败后台账里仍写着 wake，`status.recentLog` 查不出问题。
+{
+  const originalTarget = resolvedSettings.targetSessionId
+  const originalConfigTarget = config.targetSessionId
+  const stateNow = async () => JSON.parse(await status.execute({}))
+  const lastLog = async () => {
+    const a = (await stateNow()).recentLog
+    return a[a.length - 1]
+  }
+  const gateNow = async () => (await stateNow()).gate
+  const bufferedNow = async () => (await stateNow()).bufferedUnwoken
+  const fire = (type, data) => handlers['session/event']({ id: 'session-smoke' }, { type, data })
+  const tick = (ms = 15) => new Promise((r) => setTimeout(r, ms))
+  // 改 targetSessionId 是为了造失败；无论怎么退出都必须还原，否则后面所有用例连锁失败。
+  try {
+    // 闸门归零：前面几块可能留下正在跑的一轮，或一个 QQ 来源标记。
+    fire('turn/end', { reason: { kind: 'completed' } })
+    fire('user/message', { source: { kind: 'user' } })
+
+    // ① 未配置目标会话。readSettings() 会回落到 config.targetSessionId，所以两处都要清空。
+    resolvedSettings.targetSessionId = ''
+    config.targetSessionId = ''
+    let r1 = null
+    let threw1 = false
+    try {
+      r1 = JSON.parse(await sim.execute({ text: '244 在吗', userId: 'test-user' }))
+    } catch (error) {
+      threw1 = true
+      console.log('  未配置目标会话时抛了：', String(error?.message ?? error))
+    }
+    check('未配置目标会话：调用方不抛异常、仍返回可解析 JSON', threw1 === false && typeof r1?.decision === 'object', JSON.stringify(r1))
+    check(
+      '未配置目标会话：decision 标出 wakeFailed、未投递、action 仍是 wake',
+      r1?.decision?.wakeFailed === true && r1?.decision?.delivered === false && r1?.decision?.action === 'wake',
+      JSON.stringify(r1?.decision),
+    )
+    check('未配置目标会话：error 指出 targetSessionId', String(r1?.decision?.error ?? '').includes('targetSessionId'), String(r1?.decision?.error))
+    const log1 = await lastLog()
+    check('未配置目标会话：台账最后一条是 wake-failed（不再是 wake）', log1?.decision === 'wake-failed', JSON.stringify(log1))
+    check('未配置目标会话：台账带上失败原因', String(log1?.error ?? '').includes('targetSessionId'), JSON.stringify(log1))
+    const g1 = await gateNow()
+    check('未配置目标会话：闸门标志没被置位', g1.pendingFromQQ === false && g1.currentTurnFromQQ === false, JSON.stringify(g1))
+
+    // ② resume 失败：目标会话不在 live 里，假 ctx 的 ctx.agents.resume 故意抛错。
+    resolvedSettings.targetSessionId = 'session-resume-fail'
+    config.targetSessionId = 'session-resume-fail'
+    fakeAgent = null
+    let r2 = null
+    let threw2 = false
+    try {
+      r2 = JSON.parse(await sim.execute({ text: '244 在吗', userId: 'test-user' }))
+    } catch (error) {
+      threw2 = true
+      console.log('  resume 失败时抛了：', String(error?.message ?? error))
+    }
+    check('resume 失败：调用方不抛异常、仍返回可解析 JSON', threw2 === false && typeof r2?.decision === 'object', JSON.stringify(r2))
+    check(
+      'resume 失败：decision 标出 wakeFailed、未投递、error 非空',
+      r2?.decision?.wakeFailed === true && r2?.decision?.delivered === false && String(r2?.decision?.error ?? '') !== '',
+      JSON.stringify(r2?.decision),
+    )
+    const log2 = await lastLog()
+    check('resume 失败：台账最后一条是 wake-failed', log2?.decision === 'wake-failed', JSON.stringify(log2))
+
+    // ③ 投递失败（followup 抛错）。假 ctx 没有 withInitiator：它先抛错，catch 里那次 send() 再抛错。
+    //    这条就是“二次抛出逃出函数”的分支。这里同时验证闸门回滚与缓冲不丢。
+    resolvedSettings.targetSessionId = 'session-smoke'
+    config.targetSessionId = 'session-smoke'
+    // 先在缓冲里放一条：失败的唤醒**不能**把它清掉（下次唤醒还得带上）。
+    const wakeProb = resolvedSettings.wakeProbability
+    resolvedSettings.wakeProbability = 0
+    await sim.execute({ text: '这条只记录', userId: 'test-user' })
+    resolvedSettings.wakeProbability = wakeProb
+    const bufferedBefore = await bufferedNow()
+    check('投递失败之前：缓冲里已有一条待唤醒消息', bufferedBefore >= 1, `${bufferedBefore} 条`)
+
+    fakeAgent = {
+      id: 'session-smoke',
+      status: 'idle',
+      ctx: { get: () => undefined, effect: () => () => {} },
+      followup: () => {
+        throw new Error('smoke: followup 拒收')
+      },
+    }
+    let r3 = null
+    let threw3 = false
+    try {
+      r3 = JSON.parse(await sim.execute({ text: '244 在吗', userId: 'test-user' }))
+    } catch (error) {
+      threw3 = true
+      console.log('  投递失败时抛了：', String(error?.message ?? error))
+    }
+    check(
+      '投递失败：调用方不抛异常，且 error 是真实失败原因',
+      threw3 === false && r3?.decision?.wakeFailed === true && r3?.decision?.error === 'smoke: followup 拒收',
+      JSON.stringify(r3?.decision),
+    )
+    const log3 = await lastLog()
+    check('投递失败：台账记成 wake-failed', log3?.decision === 'wake-failed', JSON.stringify(log3))
+    check('投递失败：台账带失败原因', String(log3?.error ?? '').includes('followup 拒收'), JSON.stringify(log3))
+    const g3 = await gateNow()
+    check(
+      '投递失败：闸门三标志回滚到置位前的值',
+      g3.pendingFromQQ === false && g3.currentTurnFromQQ === false && g3.claimedFromQQ === false,
+      JSON.stringify(g3),
+    )
+    check('投递失败：缓冲不丢（这条消息留在缓冲里等下次唤醒）', (await bufferedNow()) === bufferedBefore, `${bufferedBefore} → ${await bufferedNow()}`)
+    fakeAgent = null
+
+    // ④ 反证：失败留下的认领若没回滚，下面这一轮（没有 QQ 来源）会被误判成 QQ 轮而误发。
+    fire('turn/start', { turn: 9 })
+    fire('assistant/message', { message: { content: [{ type: 'text', text: '[QQ]不该发出去的残留归属[/QQ]' }] } })
+    fire('turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    check('投递失败：残留归属没让非 QQ 轮误发', !sawSentText('不该发出去的残留归属'), JSON.stringify(sentTexts()))
+
+    // ⑤ 失败之后按正常时序走一轮 QQ 轮，必须真的发得出去。
+    fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+    fire('turn/start', { turn: 1 })
+    fire('assistant/message', { message: { content: [{ type: 'text', text: '[QQ]失败之后这一轮照发[/QQ]' }] } })
+    fire('turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    check('投递失败之后：下一轮 QQ 轮仍能真的发出去', lastSentText() === '失败之后这一轮照发', JSON.stringify(sentTexts()))
+  } finally {
+    resolvedSettings.targetSessionId = originalTarget
+    config.targetSessionId = originalConfigTarget
+    fakeAgent = null
+    fire('turn/end', { reason: { kind: 'completed' } })
+  }
+  check(
+    '唤醒失败用例结束后：targetSessionId 已还原',
+    resolvedSettings.targetSessionId === 'session-smoke' && config.targetSessionId === 'session-smoke',
+    `${resolvedSettings.targetSessionId} / ${config.targetSessionId}`,
+  )
+}
+
 // M3：settings Schema 直接生成设置界面上的表单 —— 每个键都必须有说明，否则界面里只剩裸键名
 {
   const reg = registeredSettings[0]
