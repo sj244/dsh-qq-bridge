@@ -1923,6 +1923,20 @@ export function apply(ctx, config) {
 
   let napcatProc = null
 
+  /**
+   * NapCat 是否在运行，以及是不是本插件启动的。
+   *
+   * `startedByPlugin` 只看 `napcatProc`：本插件起的进程结束时，下面的 clear 逻辑会把它置回 null。
+   * 外部启动（例如用户手动跑过 bat）没有进程句柄，只能靠 OneBot WS 是否已连上来判断 ——
+   * `transport.isOpen()` 为 true 说明 NapCat 已经在对面活着。
+   * 卡片按钮据此显示“已在运行”并禁用，避免重复启动。
+   */
+  function napcatRunning() {
+    const startedByPlugin = napcatProc !== null
+    const transportOpen = transport.isOpen()
+    return { running: startedByPlugin || transportOpen, startedByPlugin }
+  }
+
   function napcatPathsNow() {
     const s = readSettings()
     const installDir = s.napcatInstallDir || defaultInstallDir(home)
@@ -1951,7 +1965,8 @@ export function apply(ctx, config) {
       installed: isNapcatInstalled(installDir),
       bootMain: paths.bootMain,
       installer: paths.installer,
-      running: napcatProc !== null,
+      running: napcatRunning().running,
+      startedByPlugin: napcatProc !== null,
       qq: { primary: qq.primary, found: qq.found, minBuild: MIN_QQ_BUILD },
       subprocessAvailable: Boolean(ctx.get('subprocess')),
       downloadProxy: proxyFor(s) || '(未配置 → 直连；本机直连 GitHub 不通，建议设成 http://127.0.0.1:7890)',
@@ -2199,12 +2214,15 @@ export function apply(ctx, config) {
           '/api/qq-bridge/napcat',
           napcatRoute('GET', () => {
             const info = readNapcatWebui()
-            return { ...info, installed: isNapcatInstalled(info.installDir) }
+            // running / startedByPlugin 让卡片按钮显示真实状态，含外部启动的 NapCat。
+            return { ...info, installed: isNapcatInstalled(info.installDir), ...napcatRunning() }
           }),
         ],
         [
           '/api/qq-bridge/napcat/launch',
           napcatRoute('POST', () => {
+            // 已在运行时不重复启动：外部启动的 NapCat 也走这条判据。
+            if (napcatRunning().running) return { ok: false, error: 'NapCat 已在运行，未重复启动' }
             const result = napcatLaunch()
             return { ...result, ok: true, message: `已启动 NapCat：${result.launched}` }
           }),

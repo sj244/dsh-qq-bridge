@@ -335,21 +335,37 @@ window.__ModuleLoader__.load({
       }, [wsStore])
       const workspaceSnapshot = react.useSyncExternalStore(wsSubscribe, wsGetSnapshot)
 
-      // 展开卡片时读一次 NapCat 的 WebUI 地址（「打开 WebUI」要用）。
-      // 没有 fetch 的环境静默保持 null，按钮自己禁用，卡片其余部分照常可用。
+      /**
+       * 拉一次 NapCat 状态（WebUI 地址 + 是否在运行）。
+       * 没有 fetch 或响应不是 ok:true 时返回 undefined，调用方保持上一次的状态。
+       */
+      async function fetchNapcat() {
+        if (typeof fetch !== 'function') return undefined
+        const res = await fetch(NAPCAT_API, { headers: { accept: 'application/json' } })
+        const body = await res.json().catch(() => ({}))
+        return body && body.ok === true ? body : undefined
+      }
+
+      // 展开卡片时读一次 NapCat 状态，之后每 5 秒轮询一次。
+      // 轮询用于识别外部启动：用户在别处手动跑了 bat 时，只有重新拉取才能把按钮改成“已在运行”。
+      // 卡片收起或组件卸载时清掉定时器，不让它在后台一直跑。
       react.useEffect(() => {
-        if (!open || typeof fetch !== 'function') return undefined
+        if (!open) return undefined
         let alive = true
-        fetch(NAPCAT_API, { headers: { accept: 'application/json' } })
-          .then((res) => res.json().catch(() => ({})))
-          .then((body) => {
-            if (alive) setNapcat(body && body.ok === true ? body : null)
-          })
-          .catch(() => {
-            if (alive) setNapcat(null)
-          })
+        const pull = () => {
+          fetchNapcat()
+            .then((body) => {
+              if (alive && body !== undefined) setNapcat(body)
+            })
+            .catch(() => {
+              // 单次失败保留上一次的状态：轮询会再试，不给按钮闪一下禁用。
+            })
+        }
+        pull()
+        const timer = setInterval(pull, 5000)
         return () => {
           alive = false
+          clearInterval(timer)
         }
       }, [open])
 
@@ -368,6 +384,14 @@ window.__ModuleLoader__.load({
           setError(String((e && e.message) || e))
         } finally {
           setNapcatBusy('')
+          // 成功或失败都重拉一次：启动成功后按钮要立刻变“已在运行”，
+          // 被宿主拒绝（例如已在运行）时也要把真实状态显示出来。
+          try {
+            const fresh = await fetchNapcat()
+            if (fresh !== undefined) setNapcat(fresh)
+          } catch {
+            // 拉取失败时保留上一次的状态
+          }
         }
       }
 
@@ -497,6 +521,8 @@ window.__ModuleLoader__.load({
 
       // 「打开 WebUI」只在真读到 webui.json 时可点 —— 地址里带着 token，不给猜的余地。
       const webuiUrl = napcat && typeof napcat.webuiUrl === 'string' ? napcat.webuiUrl : ''
+      // 宿主报的 running 是权威判据（含外部启动的 NapCat）。拿不到状态时按未运行处理。
+      const napcatRunning = napcat !== null && napcat.running === true
       const napcatOps = h(
         'div',
         { style: S.ops },
@@ -516,11 +542,11 @@ window.__ModuleLoader__.load({
           'button',
           {
             type: 'button',
-            style: disabled(S.btn, napcatBusy !== ''),
-            disabled: napcatBusy !== '',
+            style: disabled(S.btn, napcatRunning || napcatBusy !== ''),
+            disabled: napcatRunning || napcatBusy !== '',
             onClick: () => postNapcat('launch', '已启动 NapCat'),
           },
-          napcatBusy === 'launch' ? '启动中…' : '启动 NapCat',
+          napcatRunning ? '已在运行' : napcatBusy === 'launch' ? '启动中…' : '启动 NapCat',
         ),
         h(
           'button',

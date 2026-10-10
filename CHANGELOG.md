@@ -2,6 +2,15 @@
 
 ## 未发布（v0.1.2 草稿）
 
+- **设置卡片的“启动 NapCat”按钮反映运行状态**：NapCat 运行中时，按钮显示“已在运行”并禁用，
+  不再重复启动。宿主半新增 `napcatRunning()`，判据有 2 条：本插件启动的进程还没结束，
+  或 OneBot WS 已连接（`transport.isOpen()`）。第 2 条用于识别外部启动的 NapCat，例如手动跑过 bat。
+  `GET /api/qq-bridge/napcat` 的返回值新增 `running` 与 `startedByPlugin` 两个布尔字段。
+  `POST /api/qq-bridge/napcat/launch` 在 NapCat 已运行时不再启动，
+  返回 `{ ok: false, error: 'NapCat 已在运行，未重复启动' }`。
+  卡片展开期间每 5 秒轮询一次该接口，用于发现外部启动。
+  卡片收起或组件卸载时清掉定时器。
+  启动请求结束后，按钮重拉一次状态，成功与失败都重拉。
 - **NapCat 启动改为按布局探测，并优先调用官方 launcher**（真机修复）：以前把路径写死成
   `<安装目录>/bootmain/NapCatWinBootMain.exe`。用户把 `napcatInstallDir` 设成 `NapCat.Shell` 子目录时，
   这条路径必然不存在，点“启动 NapCat”只会报“找不到 …，先跑 action:download”。

@@ -265,6 +265,8 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
   host / port / token 拼成；没读到该文件时按钮禁用，旁边显示“没读到 webui.json”。
 - **启动 NapCat**：与工具 `qq_bridge_napcat` 的 `launch` 是同一个动作。目录里有官方
   `launcher-win10.bat` 时优先调用该脚本，脚本会自我提权，**可能弹出 UAC 窗口**。
+  NapCat 运行中时，按钮显示“已在运行”并禁用；外部手动启动的 NapCat 也算运行中。
+  卡片展开期间每 5 秒轮询一次状态，所以外部启动后按钮会自己变化。
 - **打开文件夹**：用系统文件管理器打开 NapCat 安装目录（Windows 用 `explorer.exe`，macOS 用 `open`，
   Linux 用 `xdg-open`）。
 

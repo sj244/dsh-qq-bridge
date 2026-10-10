@@ -1126,6 +1126,16 @@ if (sim) {
     got.installed === false,
     String(got.installed),
   )
+  check(
+    'GET /napcat：running / startedByPlugin 都是布尔量',
+    typeof got.running === 'boolean' && typeof got.startedByPlugin === 'boolean',
+    JSON.stringify({ running: got.running, startedByPlugin: got.startedByPlugin }),
+  )
+  check(
+    'GET /napcat：测试环境没连 OneBot WS、也没启动过 → running=false',
+    got.running === false && got.startedByPlugin === false,
+    JSON.stringify({ running: got.running, startedByPlugin: got.startedByPlugin }),
+  )
 
   const res2 = makeRes()
   await napcatGet(req('GET', { addr: '10.0.0.9', url: '/api/qq-bridge/napcat' }), res2)
