@@ -271,6 +271,26 @@ if (sim) {
   check('两块各自独立抽取', extractQQReply(two) === '第一句\n\n第二句', JSON.stringify(extractQQReply(two)))
   const inline = '前置文字 [QQ]行内的块[/QQ] 后置文字'
   check('行内的块不再被当作块（宁可漏发也不串味）', extractQQReply(inline) === '', JSON.stringify(extractQQReply(inline)))
+  // issue #1：模型先写回答、再调工具，随后又把同一句重写一遍。
+  // 本轮正文按 step 累积，直接拼接会让 QQ 收到连着两句相同的话。
+  // 相邻且相同的块只发一次。
+  const dupAdjacent = '技术说明\n[QQ]在的[/QQ]\n[QQ]在的[/QQ]\n尾注'
+  check('相邻重复块只发一次', extractQQReply(dupAdjacent) === '在的', JSON.stringify(extractQQReply(dupAdjacent)))
+  // 现场的形状：两块之间夹着给 DSH 看的正文，块相邻而文本不相邻
+  const dupAcrossProse = '[QQ]在的[/QQ]\n（调一下 NapCat 接口看看）\n[QQ]在的[/QQ]'
+  check(
+    '块相邻但中间夹着正文 → 仍然只发一次',
+    extractQQReply(dupAcrossProse) === '在的',
+    JSON.stringify(extractQQReply(dupAcrossProse)),
+  )
+  check(
+    '去重按 trim 后比较，不误伤不同的块',
+    extractQQReply('[QQ]第一句[/QQ]\n[QQ]  第一句  [/QQ]\n[QQ]第二句[/QQ]') === '第一句\n\n第二句',
+  )
+  check(
+    '非相邻的重复保持原样（可能是刻意复述）',
+    extractQQReply('[QQ]收到[/QQ]\n[QQ]好的[/QQ]\n[QQ]收到[/QQ]') === '收到\n\n好的\n\n收到',
+  )
 }
 
 // 上下文上限：别让群里的长文把上下文撑爆
@@ -550,6 +570,15 @@ function sawSentText(s) {
   reply('[QQ]回归通过[/QQ]')
   await endA()
   check('回归：source 被改写成 user 也不哑火（按正文前缀认出来）', lastSentText() === '回归通过', JSON.stringify(sentTexts()))
+
+  // issue #1 端到端：同一条 QQ 轮里，模型分两个 step 写出同一个块。
+  // 正文按 step 累积，拼接后会出现两块相同的话；出站必须只发一次。
+  fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+  start()
+  reply('先看一眼接口再说\n[QQ]在的[/QQ]')
+  reply('[QQ]在的[/QQ]')
+  await endA()
+  check('端到端：两个 step 写同一个块，QQ 只收到一次', lastSentText() === '在的', JSON.stringify(sentTexts()))
 
   // 排障入口：status 里要能看到最近观测到的 user/message（哑火时看 ours 是不是 false）
   const st2 = JSON.parse(await status.execute({}))

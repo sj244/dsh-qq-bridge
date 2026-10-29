@@ -3126,7 +3126,14 @@ export function extractQQReply(text) {
   // 要求行首即可挡住行内提及，同时保留多行块的能力。
   for (const m of String(text ?? '').matchAll(/^[ \t]*\[QQ\]([\s\S]*?)\[\/QQ\]/gim)) {
     const piece = m[1].trim()
-    if (piece !== '') out.push(piece)
+    if (piece === '') continue
+    // 相邻且完全相同的块只保留一个。
+    // 现场：模型在 step 1 写出块并发起工具调用，工具返回后 step 2 又写了同一句。
+    // 本轮正文按 step 累积，两段直接拼接会让 QQ 收到连着两句相同的话。
+    // 只比较相邻：中间隔着别的块时可能是刻意复述，保持原样。
+    // 比较的是块内正文（已 trim），所以两段之间夹着给 DSH 看的正文也能识别。
+    if (out.length > 0 && out[out.length - 1] === piece) continue
+    out.push(piece)
   }
   return out.join('\n\n')
 }
