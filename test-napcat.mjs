@@ -10,19 +10,24 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  configDirCandidates,
   crc32,
   defaultInstallDir,
   detectQq,
   downloadVerified,
   extractZip,
   isNapcatInstalled,
+  napcatDataDirOf,
   napcatPaths,
   oneBotConfig,
   pickAsset,
+  pickWriteConfigDir,
   readOneBotConfig,
   resolveRelease,
   sha256Of,
   writeOneBotConfig,
+  DATA_DIR_ENV,
+  DATA_DIR_NAME,
 } from './napcat.js'
 
 let failed = 0
@@ -389,6 +394,108 @@ check('包含匹配资产', pickAsset(assets, 'Framework').url === 'u1')
 
   const qq = detectQq({ env: {} })
   check('detectQq 返回结构正常', Array.isArray(qq.found) && 'primary' in qq)
+}
+
+// ── 8) 隔离数据目录（NAPCAT_QQ_DATA_DIR）─────────────────────────────────────
+//
+// 真机根因：NapCat 注入的那份 QQ 与桌面版共用数据目录时，QQ 内核不触发初始化回调，
+// 登录核心永远不就绪（NapCat issue #2135）。4.18.42 起用 NAPCAT_QQ_DATA_DIR 隔离，
+// 配置也跟着搬到 <dataDir>/NapCat/config。
+{
+  const installDir = join(work, 'iso-install')
+
+  // 8a) 设置项留空 → 回落到 <installDir>/qqdata
+  check(
+    `napcatDataDirOf：设置留空回落到 <installDir>/${DATA_DIR_NAME}`,
+    napcatDataDirOf({ napcatDataDir: '' }, installDir) === join(installDir, DATA_DIR_NAME),
+    napcatDataDirOf({ napcatDataDir: '' }, installDir),
+  )
+  check(
+    'napcatDataDirOf：设置非空时用它，并去掉首尾空格',
+    napcatDataDirOf({ napcatDataDir: '  D:\\iso-data  ' }, installDir) === 'D:\\iso-data',
+    napcatDataDirOf({ napcatDataDir: '  D:\\iso-data  ' }, installDir),
+  )
+  check('napcatDataDirOf：也接受裸字符串', napcatDataDirOf('E:\\x', installDir) === 'E:\\x')
+  check('环境变量名与 NapCat 4.18.42 的实现一致', DATA_DIR_ENV === 'NAPCAT_QQ_DATA_DIR', DATA_DIR_ENV)
+
+  // 8b) configDirCandidates：隔离目录存在时排在首位
+  const dataDir = join(work, 'iso-data')
+  const isoConfigDir = join(dataDir, 'NapCat', 'config')
+  const installConfigDir = join(installDir, 'config')
+  mkdirSync(isoConfigDir, { recursive: true })
+  mkdirSync(installConfigDir, { recursive: true })
+  writeOneBotConfig({ configDir: installConfigDir, port: 3001 })
+  // 真机状态：NapCat 在隔离目录里生成过默认配置，安装目录里另有一份带 WS 服务的配置。
+  writeOneBotConfig({ configDir: isoConfigDir, port: 3002 })
+  const cands = configDirCandidates({ installDir, qqPath: null, dataDir })
+  check(
+    'configDirCandidates：隔离目录排在首位',
+    cands[0]?.dir === isoConfigDir,
+    JSON.stringify(cands.map((c) => c.dir)),
+  )
+  check(
+    'configDirCandidates：隔离目录与安装目录同时有配置时，隔离目录仍在首位',
+    cands[0]?.hasOneBot === true && cands.some((c) => c.dir === installConfigDir && c.hasOneBot === true),
+    JSON.stringify(cands.map((c) => ({ dir: c.dir, hasOneBot: c.hasOneBot }))),
+  )
+
+  const noIso = configDirCandidates({ installDir, qqPath: null })
+  check(
+    'configDirCandidates：不传 dataDir 时没有隔离候选',
+    noIso.every((c) => c.dir !== isoConfigDir),
+    JSON.stringify(noIso.map((c) => c.dir)),
+  )
+  check(
+    'configDirCandidates：不传 dataDir 时首位是安装目录的 config',
+    noIso[0]?.dir === installConfigDir,
+    String(noIso[0]?.dir),
+  )
+
+  const onlyParent = configDirCandidates({ installDir, qqPath: null, dataDir: join(work, 'iso-parent-only') })
+  check(
+    'configDirCandidates：隔离目录完全不存在时不出现在候选里',
+    onlyParent.every((c) => c.dir !== join(work, 'iso-parent-only', 'NapCat', 'config')),
+    JSON.stringify(onlyParent.map((c) => c.dir)),
+  )
+
+  // 8c) 写入目标：隔离目录与安装目录同时有配置文件时，必须写隔离目录
+  const target = pickWriteConfigDir({ candidates: cands, dataDir, fallback: installConfigDir })
+  check('pickWriteConfigDir：两边都有配置时选隔离目录', target === isoConfigDir, target)
+  const p = writeOneBotConfig({ configDir: target, port: 3005, token: 'iso-token' })
+  const back = readOneBotConfig(target)
+  check(
+    'napcatConfigure 的写入目标：onebot11.json 落在隔离目录',
+    p === join(isoConfigDir, 'onebot11.json') && existsSync(p),
+    p,
+  )
+  check('写进隔离目录的端口正确', back?.network?.websocketServers?.[0]?.port === 3005)
+  check(
+    '写隔离目录时不改安装目录里的旧配置',
+    readOneBotConfig(installConfigDir)?.network?.websocketServers?.[0]?.port === 3001,
+  )
+
+  // 8d) 隔离目录还没建起来时，写入目标仍然指向它（启动后 NapCat 只读这里）
+  const freshDataDir = join(work, 'iso-fresh')
+  const freshTarget = pickWriteConfigDir({
+    candidates: configDirCandidates({ installDir, qqPath: null, dataDir: freshDataDir }),
+    dataDir: freshDataDir,
+    fallback: installConfigDir,
+  })
+  check(
+    'pickWriteConfigDir：隔离目录不存在时也指向隔离路径',
+    freshTarget === join(freshDataDir, 'NapCat', 'config'),
+    freshTarget,
+  )
+
+  // 8e) dataDir 为空时退回旧行为（有配置文件的候选 → fallback）
+  check(
+    'pickWriteConfigDir：dataDir 为空时用有配置文件的候选',
+    pickWriteConfigDir({ candidates: noIso, dataDir: '', fallback: installConfigDir }) === installConfigDir,
+  )
+  check(
+    'pickWriteConfigDir：dataDir 为空且没有候选时用 fallback',
+    pickWriteConfigDir({ candidates: [], dataDir: '', fallback: installConfigDir }) === installConfigDir,
+  )
 }
 
 // 收尾

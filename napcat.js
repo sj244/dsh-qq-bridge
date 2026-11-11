@@ -29,6 +29,13 @@ export const GITHUB_API = 'https://api.github.com'
 export const DEFAULT_ASSET = 'NapCat.Shell.Windows.OneKey.zip'
 /** NapCat 要求的最低 QQ NT 版本（来自 release 说明）。 */
 export const MIN_QQ_BUILD = 40768
+/**
+ * 隔离数据目录的环境变量名。NapCat 4.18.42 起读取它。
+ * 来源：NapCat 源码里的 `n3()`（`process.env.NAPCAT_QQ_DATA_DIR`）。
+ */
+export const DATA_DIR_ENV = 'NAPCAT_QQ_DATA_DIR'
+/** 设置项 `napcatDataDir` 留空时，隔离数据目录取安装目录下的这个名字。 */
+export const DATA_DIR_NAME = 'qqdata'
 
 // ── 摘要与校验 ───────────────────────────────────────────────────────────────
 
@@ -368,14 +375,36 @@ export function readOneBotConfig(configDir) {
 }
 
 /**
+ * 取 NapCat 的隔离数据目录。
+ *
+ * 设置项 `napcatDataDir` 非空时用设置项的值。设置项为空时用 `<installDir>/qqdata`。
+ * `s` 接受设置对象（读 `napcatDataDir`），也接受裸字符串，便于单独测试。
+ */
+export function napcatDataDirOf(s, installDir) {
+  const raw = typeof s === 'string' ? s : s?.napcatDataDir
+  const value = String(raw ?? '').trim()
+  if (value !== '') return value
+  return join(installDir, DATA_DIR_NAME)
+}
+
+/**
  * NapCat 的 config 目录可能落在几个地方，取决于安装方式：
+ *   - 隔离数据目录 `<dataDir>/NapCat/config`（启动时导出 `NAPCAT_QQ_DATA_DIR` 后**只读这里**）
  *   - OneKey 解包出来的根目录下的 `config/`（如果整个目录被搬过去）
  *   - `NapCat.Shell` 子目录下的 `config/`（用户把安装目录设成该子目录时）
  *   - QQ 安装目录里 NapCat 自己的数据目录（安装器安装后的常见落点）
  * 这里只做**候选列举 + 存在性判断**，不猜、不乱写。
+ *
+ * 隔离数据目录排在**最高优先级**：它一旦出现，NapCat 就不再读安装目录里的配置。
  */
-export function configDirCandidates({ installDir, qqPath = null }) {
-  const list = [join(napcatPaths(installDir).shellDir, 'config'), join(installDir, 'config')]
+export function configDirCandidates({ installDir, qqPath = null, dataDir = '' }) {
+  const list = []
+  if (dataDir !== '') {
+    const isolated = join(dataDir, 'NapCat', 'config')
+    // 目录本身或其父目录存在，就说明隔离数据目录已经启用。
+    if (existsSync(isolated) || existsSync(join(dataDir, 'NapCat')) || existsSync(dataDir)) list.push(isolated)
+  }
+  list.push(join(napcatPaths(installDir).shellDir, 'config'), join(installDir, 'config'))
   if (qqPath) {
     const qqDir = dirname(qqPath)
     list.push(join(qqDir, 'resources', 'app', 'app_launcher', 'napcat', 'config'))
@@ -387,6 +416,20 @@ export function configDirCandidates({ installDir, qqPath = null }) {
     hasOneBot: existsSync(join(dir, 'onebot11.json')),
     hasWebUi: existsSync(join(dir, 'webui.json')),
   }))
+}
+
+/**
+ * 选配置的**写入目录**。
+ *
+ * 启动总会导出 `NAPCAT_QQ_DATA_DIR`，NapCat 随后只读 `<dataDir>/NapCat/config`。
+ * 所以隔离数据目录非空时，写入目标必须落在这里，否则写完没人读。
+ * 隔离数据目录为空时，退到已有配置文件的候选，再退到 `fallback`。
+ */
+export function pickWriteConfigDir({ candidates = [], dataDir = '', fallback }) {
+  if (dataDir !== '') return join(dataDir, 'NapCat', 'config')
+  const hit = candidates.find((c) => c.hasWebUi === true || c.hasOneBot === true)
+  if (hit) return hit.dir
+  return fallback
 }
 
 // ── QQ 检测（只读，不碰用户的 QQ 安装）───────────────────────────────────────

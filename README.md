@@ -150,19 +150,40 @@ QQ 消息 ─┬─ 不在白名单 ──────────────�
 
 | 步骤 | 调用 | 说明 |
 |---|---|---|
-| 1 | `{ action: "status" }` | 查看 QQ 是否已安装、NapCat 是否存在、代理是否配置、端口是否正确 |
+| 1 | `{ action: "status" }` | 查看 QQ 是否已安装、NapCat 是否存在、代理是否配置、端口是否正确、隔离数据目录在哪 |
 | 2 | `{ action: "download" }` | 取最新发行包 → **sha256 校验** → 解包到 `napcatInstallDir` |
 | 3 | **手动运行一次安装器** | 见下文；这一步插件无法执行 |
-| 4 | `{ action: "configure" }` | 写 `config/onebot11.json`，把正向 WS 端口和 token 配好（**不用打开 WebUI**） |
+| 4 | `{ action: "configure" }` | 写 `<dataDir>/NapCat/config/onebot11.json`，把正向 WS 端口和 token 配好（**不用打开 WebUI**） |
 | 5 | `{ action: "launch" }` | 启动 NapCat（首次仍需扫码登录） |
 
 安装目录可以是 OneKey 根，也可以是 OneKey 根下的 `NapCat.Shell` 子目录；两种布局都能识别。
 
-**启动优先走官方 launcher**：目录里存在 `launcher-win10.bat`（或 `launcher.bat`）时，插件用
-`cmd /c` 调用这个 bat 脚本，工作目录设为 `NapCat.Shell`。脚本自己读注册表找 QQ 路径，非管理员时用
-UAC 自我提权，因此**可能弹出 UAC 窗口**，需要在系统弹窗里点“是”。
+**数据目录必须隔离**：NapCat 注入的那份 QQ 会按注册表
+`HKLM\SOFTWARE\WOW6432Node\Tencent\QQNT` 的 `Install=` 找到桌面版 QQ 的数据目录并共用。
+共用时 QQ 内核不触发初始化回调，登录核心永远不就绪（NapCat issue #2135）：WebUI 可打开、
+报 `coreReady:false`、没有二维码、OneBot 端口不监听、`loginError` 为空。
+
+NapCat 4.18.42 起读取环境变量 `NAPCAT_QQ_DATA_DIR`，设置后注入 QQ 的数据目录被隔离
+（4.18.37 不支持）。插件在 `launch` 前做三件事：
+
+1. 建好数据目录。默认是 `<安装目录>/qqdata`，可用 `napcatDataDir` 改。
+2. 用 `setx` 把 `NAPCAT_QQ_DATA_DIR` 写进**用户级持久环境变量**（`HKCU\Environment`）。
+   只设在启动进程的环境里，经 `Start-Process -Verb RunAs` 提权后会丢失，隔离目录保持为空。
+   写入失败只记 warn，不阻断启动。
+3. 同时把变量放进子进程环境（`env`），覆盖不提权的路径。
+
+隔离数据目录的结构是 `<dataDir>\NapCat\{cache,config,data,logs,temp}`、`<dataDir>\<QQ号>\nt_qq`、
+`<dataDir>\nt_qq\global`。**配置目录也跟着搬**：NapCat 只读 `<dataDir>\NapCat\config\`，
+安装目录下的 `config\onebot11.json` 不再被读取。`configure` 因此写到隔离目录；
+`configDirCandidates` 也把隔离目录排在首位。
+
+**启动由插件自己提权，提权目标是 cmd**：目录里存在 `launcher-win10.bat`（或 `launcher.bat`）时，
+插件调 `powershell.exe -Command Start-Process … -Verb RunAs` 起一个提权的 `cmd.exe`，
+在 cmd 里执行这个 bat 脚本。脚本自己读注册表找 QQ 路径，因此**可能弹出 UAC 窗口**，
+需要在系统弹窗里点“是”。
 没有 launcher 脚本时，插件直接调用 `NapCatWinBootMain.exe`，并按官方参数顺序传入
 QQ 路径与 `NapCatWinBootHook.dll`；此时 QQ 路径取不到会明确报错，先手动安装并登录一次 QQ NT 即可。
+启动**不传 `-q`**：扫码登录过一次之后，NapCat 自己保管凭证。
 
 **第 3 步必须手动执行的原因**：
 
@@ -327,10 +348,11 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
-- **打开 WebUI**：用系统默认浏览器打开 NapCat 的 WebUI。地址由 `<安装目录>/config/webui.json` 里的
-  host / port / token 拼成；没读到该文件时按钮禁用，旁边显示“没读到 webui.json”。
+- **打开 WebUI**：用系统默认浏览器打开 NapCat 的 WebUI。地址由 `webui.json` 里的
+  host / port / token 拼成，读取顺序为隔离数据目录、安装目录；没读到该文件时按钮禁用，
+  旁边显示“没读到 webui.json”。
 - **启动 NapCat**：与工具 `qq_bridge_napcat` 的 `launch` 是同一个动作。目录里有官方
-  `launcher-win10.bat` 时优先调用该脚本，脚本会自我提权，**可能弹出 UAC 窗口**。
+  `launcher-win10.bat` 时，插件自己提权起一个 `cmd.exe` 来跑该脚本，**可能弹出 UAC 窗口**。
   NapCat 运行中时，按钮显示“已在运行”并禁用；外部手动启动的 NapCat 也算运行中。
   卡片展开期间每 5 秒轮询一次状态，所以外部启动后按钮会自己变化。
 - **打开文件夹**：用系统文件管理器打开 NapCat 安装目录（Windows 用 `explorer.exe`，macOS 用 `open`，
@@ -366,6 +388,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `selfId` | `''` | 插件自身的 QQ 号；空 = 连上后自动获取 |
 | `heartbeatTimeoutMs` | `90000` | 多久没有 WS 流量就判定连接已死并重连 |
 | `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat` |
+| `napcatDataDir` | `''` | NapCat 隔离数据目录（`NAPCAT_QQ_DATA_DIR` 的值）；空 = `<安装目录>/qqdata` |
 | `napcatVersion` | `''` | 要装的版本 tag；空 = 最新 |
 | `downloadProxy` | `''` | 下载用代理；空 = 读环境变量 |
 | `onebotPort` | `3001` | 写进 NapCat 配置并用来连的 WS 端口 |
@@ -465,12 +488,12 @@ QQ 侧没有人能点击“同意”，因此：
 
 ## 测试
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **498 条断言**：
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **532 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 设置卡片字段（假 ctx，纯离线）
 node test-onebot.mjs    # M2 端到端：内置最小 OneBot WS 服务器，验证收发全链路
-node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / 配置写入
+node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / 配置写入 / 隔离数据目录
 node test-stickers.mjs  # 表情包登记表：哈希 / 读写 / 查找 / 原子写 / importSticker 复制文件
 ```
 

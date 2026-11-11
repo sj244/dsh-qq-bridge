@@ -249,6 +249,12 @@ if (sim) {
   const out = JSON.parse(await nap.execute({ action: 'status' }))
   check('qq_bridge_napcat status 可执行', typeof out.installDir === 'string' && 'installed' in out, JSON.stringify(out.installDir))
   check('无 subprocess 时如实报告', out.subprocessAvailable === false)
+  // 隔离数据目录：设置项留空时回落到 <安装目录>/qqdata（启动时按它导出 NAPCAT_QQ_DATA_DIR）。
+  check(
+    'status：napcatDataDir 留空时回落到 <安装目录>/qqdata',
+    out.dataDir === join(config.napcatInstallDir, 'qqdata'),
+    String(out.dataDir),
+  )
   const bad = JSON.parse(await nap.execute({ action: 'nonsense' }))
   check('未知 action 返回错误而非抛异常', typeof bad.error === 'string', bad.error)
   const cannotLaunch = JSON.parse(await nap.execute({ action: 'launch' }))
@@ -1009,13 +1015,19 @@ function sawSentText(s) {
   check('注册了 settings 命名空间 qq-bridge', registeredSettings.length === 1 && reg?.ns === 'qq-bridge', String(reg?.ns))
   const dict = reg?.schema?.dict ?? {}
   const keys = Object.keys(dict)
-  check('settings 键数量符合预期（23）', keys.length === 23, `实际 ${keys.length}`)
+  check('settings 键数量符合预期（24）', keys.length === 24, `实际 ${keys.length}`)
   const missing = keys.filter((k) => String(dict[k]?.meta?.description ?? '').trim() === '')
   check('每个 settings 键都有说明（设置界面里能看懂）', missing.length === 0, missing.join(', '))
   // readSettings() 会读到的键必须都在 Schema 里，否则用户在界面上改不到它
   const want = ['targetSessionId', 'nicknames', 'wakeProbability', 'whitelist', 'groupWhitelist', 'replyMode', 'visionModel']
   const absent = want.filter((k) => !keys.includes(k))
   check('关键键都在 Schema 里（界面上改得到）', absent.length === 0, absent.join(', '))
+  // 隔离数据目录：默认空串 = 用 <安装目录>/qqdata，界面里也能改。
+  check(
+    'napcatDataDir 默认是空串（留空 = <安装目录>/qqdata）',
+    String(dict.napcatDataDir?.meta?.default ?? null) === '',
+    JSON.stringify(dict.napcatDataDir?.meta?.default),
+  )
 }
 
 // ★ 恢复**没开着的**会话时必须带上模型 —— 否则 {{model}} 无值，整轮提示词组装会抛错。
@@ -1958,6 +1970,46 @@ function sawSentText(s) {
       `POST /napcat/${label}：返回 JSON 且有 ok 字段（测试环境允许 ok:false）`,
       typeof body?.ok === 'boolean',
       `${res.out.status} ${String(res.out.body).slice(0, 120)}`,
+    )
+  }
+
+  // ── 隔离数据目录：configure 必须写到 <安装目录>/qqdata/NapCat/config ──────
+  // 启动时导出 NAPCAT_QQ_DATA_DIR，NapCat 之后只读隔离目录里的配置。
+  // 写到安装目录的 config 就没人读了（真机现象：登录成功但 3001 不监听）。
+  // 放在全部 GET /napcat 用例之后：写配置会建起隔离目录，先建会改变候选顺序。
+  {
+    const isoDataDir = join(installDir, 'qqdata')
+    const isoOnebot = join(isoDataDir, 'NapCat', 'config', 'onebot11.json')
+    check('configure 之前隔离目录还不存在（用例前提）', !existsSync(isoOnebot), isoOnebot)
+    const napcatTool = registered.filter((t) => t.name === 'qq_bridge_napcat').at(-1)
+    const cfgOut = JSON.parse(await napcatTool.execute({ action: 'configure', configDir: '' }))
+    check(
+      'napcatConfigure：默认目标 = <安装目录>/qqdata/NapCat/config',
+      cfgOut.configDir === join(isoDataDir, 'NapCat', 'config'),
+      String(cfgOut.configDir),
+    )
+    check('napcatConfigure：返回值带 dataDir', cfgOut.dataDir === isoDataDir, String(cfgOut.dataDir))
+    check('napcatConfigure：onebot11.json 真的落在隔离目录', existsSync(isoOnebot), isoOnebot)
+    let isoCfg = null
+    try {
+      isoCfg = JSON.parse(readFileSync(isoOnebot, 'utf8'))
+    } catch {
+      isoCfg = null
+    }
+    check(
+      'napcatConfigure：写进隔离目录的端口 = 设置里的 3001',
+      isoCfg?.network?.websocketServers?.[0]?.port === 3001,
+      JSON.stringify(isoCfg?.network?.websocketServers?.[0]?.port),
+    )
+    check(
+      'napcatConfigure：返回值 notes 写明配置落在隔离目录',
+      Array.isArray(cfgOut.notes) && cfgOut.notes.some((n) => String(n).includes(isoDataDir)),
+      JSON.stringify(cfgOut.notes),
+    )
+    // 安装目录里那份 webui.json 不该被顺手改写。
+    check(
+      'napcatConfigure：安装目录里的 webui.json 没被改写',
+      JSON.parse(readFileSync(join(installDir, 'config', 'webui.json'), 'utf8')).token === 'tok123',
     )
   }
 

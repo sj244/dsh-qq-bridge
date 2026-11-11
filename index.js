@@ -41,11 +41,14 @@ import {
   downloadVerified,
   extractZip,
   isNapcatInstalled,
+  napcatDataDirOf,
   napcatPaths,
   pickAsset,
+  pickWriteConfigDir,
   readOneBotConfig,
   resolveRelease,
   writeOneBotConfig,
+  DATA_DIR_ENV,
   DEFAULT_ASSET,
   MIN_QQ_BUILD,
 } from './napcat.js'
@@ -131,6 +134,7 @@ export const Config = Schema.object({
   // 注意：这些只是**参数**；插件加载时绝不下载或执行任何东西，
   // 一切都要靠显式调用 qq_bridge_napcat 工具。
   napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
+  napcatDataDir: Schema.string().default('').description('NapCat 隔离数据目录；留空 = <安装目录>/qqdata。'),
   napcatVersion: Schema.string().default('').description('要装的 NapCat 版本 tag（如 v4.18.28）；留空 = 最新。'),
   napcatAsset: Schema.string().default(DEFAULT_ASSET).description('要下载的发行资产名。'),
   downloadProxy: Schema.string().default('').description('下载用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
@@ -171,6 +175,7 @@ const BridgeSettings = Schema.object({
   agentPreset: Schema.string().default('').description('resume 目标会话时挂载的 agent preset；留空 = 沿用会话 header 里记录的。'),
   // M5
   napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
+  napcatDataDir: Schema.string().default('').description('NapCat 隔离数据目录；留空 = <安装目录>/qqdata。该目录隔离了桌面版 QQ 的数据。'),
   napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本 tag（如 v4.18.28）；留空 = 最新。'),
   downloadProxy: Schema.string().default('').description('下载 NapCat 用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
   onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
@@ -359,6 +364,7 @@ export function apply(ctx, config) {
         replyMode: normalizeReplyMode(config.replyMode),
         delivery: normalizeDelivery(config.delivery),
         napcatInstallDir: config.napcatInstallDir ?? '',
+        napcatDataDir: config.napcatDataDir ?? '',
         napcatVersion: config.napcatVersion ?? '',
         downloadProxy: config.downloadProxy ?? '',
         onebotPort: config.onebotPort ?? 3001,
@@ -410,6 +416,7 @@ export function apply(ctx, config) {
       agentPreset: String(s.agentPreset ?? config.agentPreset ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
       napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
+      napcatDataDir: String(s.napcatDataDir ?? config.napcatDataDir ?? '').trim(),
       napcatVersion: String(s.napcatVersion ?? config.napcatVersion ?? '').trim(),
       downloadProxy: String(s.downloadProxy ?? config.downloadProxy ?? '').trim(),
       onebotPort: Math.max(1, Math.min(65535, Number(s.onebotPort ?? config.onebotPort ?? 3001))),
@@ -2594,7 +2601,7 @@ export function apply(ctx, config) {
   function napcatPathsNow() {
     const s = readSettings()
     const installDir = s.napcatInstallDir || defaultInstallDir(home)
-    return { s, installDir, paths: napcatPaths(installDir) }
+    return { s, installDir, dataDir: napcatDataDirOf(s, installDir), paths: napcatPaths(installDir) }
   }
 
   /** 下载用的代理：设置优先，其次环境变量，最后直连。 */
@@ -2607,15 +2614,19 @@ export function apply(ctx, config) {
   }
 
   async function napcatStatus() {
-    const { s, installDir, paths } = napcatPathsNow()
+    const { s, installDir, dataDir, paths } = napcatPathsNow()
     const qq = detectQq()
-    const cfg = readOneBotConfig(paths.configDir)
+    const candidates = configDirCandidates({ installDir, qqPath: qq.primary, dataDir })
+    // 写入目标与读取目标必须是同一个目录：NapCat 只读隔离数据目录里的配置。
+    const configDir = pickWriteConfigDir({ candidates, dataDir, fallback: paths.configDir })
+    const cfg = readOneBotConfig(configDir)
     const token = await resolveAccessToken()
     const enabled = Array.isArray(cfg?.network?.websocketServers)
       ? cfg.network.websocketServers.filter((w) => w?.enable)
       : []
     return {
       installDir,
+      dataDir,
       installed: isNapcatInstalled(installDir),
       bootMain: paths.bootMain,
       installer: paths.installer,
@@ -2631,8 +2642,8 @@ export function apply(ctx, config) {
       tokenResolved: token !== '',
       configured: enabled.length > 0,
       configuredServers: enabled.map((w) => ({ name: w.name, host: w.host, port: w.port, tokenSet: w.token !== '' })),
-      configDir: paths.configDir,
-      configCandidates: configDirCandidates({ installDir, qqPath: qq.primary }),
+      configDir,
+      configCandidates: candidates,
     }
   }
 
@@ -2665,34 +2676,82 @@ export function apply(ctx, config) {
   }
 
   async function napcatConfigure(args) {
-    const { s, installDir, paths } = napcatPathsNow()
+    const { s, installDir, dataDir, paths } = napcatPathsNow()
     const qq = detectQq()
     const explicit = String(args.configDir ?? '').trim()
-    let configDir = explicit !== '' ? explicit : paths.configDir
-    if (explicit === '') {
-      // 安装目录里如果没有 config/，但 QQ 那边已经存在 NapCat 的 config，就用那个。
-      const hit = configDirCandidates({ installDir, qqPath: qq.primary }).find((c) => c.hasWebUi || c.hasOneBot)
-      if (hit) configDir = hit.dir
+    let configDir = explicit
+    if (configDir === '') {
+      // 隔离数据目录优先：启动时导出的 NAPCAT_QQ_DATA_DIR 让 NapCat 只读那里的配置。
+      configDir = pickWriteConfigDir({
+        candidates: configDirCandidates({ installDir, qqPath: qq.primary, dataDir }),
+        dataDir,
+        fallback: paths.configDir,
+      })
     }
     const token = await resolveAccessToken()
     const path = writeOneBotConfig({ configDir, port: s.onebotPort, token })
     return {
       path,
       configDir,
+      dataDir,
       port: s.onebotPort,
       host: '127.0.0.1',
       tokenSet: token !== '',
       onebotUrlToSet: `ws://127.0.0.1:${s.onebotPort}`,
       notes: [
         token === '' ? '⚠️ 没解析到 access_token（accessTokenEnv 没配或凭据为空），写进去的 token 是空的 = 无鉴权。' : 'token 已按 accessTokenEnv 写入。',
+        explicit !== ''
+          ? `配置目录由 configDir 参数指定：${configDir}。`
+          : `配置写在隔离数据目录里：${dataDir}。NapCat 只读这里，安装目录下的 config 不再生效。`,
         'NapCat 需要**重启**才会读这份配置。',
         '如果 NapCat 实际读取的 config 目录不是这个，用 configDir 参数显式指定。',
       ],
     }
   }
 
-  function napcatLaunch() {
-    const { s, paths } = napcatPathsNow()
+  /**
+   * 把 `NAPCAT_QQ_DATA_DIR` 写进**用户级持久环境变量**（`HKCU\Environment`，即 `setx` 的效果）。
+   *
+   * 只把变量设在启动进程的环境里，经 `launcher-win10.bat` → `launcher-elevate.ps1` →
+   * `Start-Process -Verb RunAs` 提权后会丢失 —— 真机实测隔离目录保持为空。
+   * 提权进程从用户配置读环境，所以必须写持久变量。写失败只记 warn，不阻断启动。
+   */
+  async function persistDataDirEnv(subprocess, dataDir) {
+    try {
+      const setx = await subprocess.resolveExecutable('setx.exe')
+      const handle = subprocess.spawn({
+        argv: [setx, DATA_DIR_ENV, dataDir],
+        cwd: dataDir,
+        stdio: { stdin: 'ignore', stdout: { maxBytes: 64 * 1024 }, stderr: { maxBytes: 64 * 1024 } },
+        graceMs: 8000,
+      })
+      const outcome = await handle.done
+      const stderr = handle.collected?.stderr ? handle.collected.stderr.readFrom(0).text.trim() : ''
+      if (outcome.exitCode !== 0) {
+        logger.warn(`写用户级环境变量 ${DATA_DIR_ENV} 失败（exit=${outcome.exitCode}）：${stderr.slice(0, 200)}`)
+        return false
+      }
+      return true
+    } catch (error) {
+      logger.warn(`写用户级环境变量 ${DATA_DIR_ENV} 失败：${error?.message ?? error}`)
+      return false
+    }
+  }
+
+  /**
+   * 启动 NapCat。
+   *
+   * **必须隔离 QQ 的数据目录**：NapCat 注入的那份 QQ 会按注册表
+   * `HKLM\SOFTWARE\WOW6432Node\Tencent\QQNT` 的 `Install=` 找到桌面版 QQ 的数据目录并共用。
+   * 共用时 QQ 内核不触发初始化回调，登录核心永远不就绪：WebUI 可用、`coreReady:false`、
+   * 无二维码、OneBot 端口不监听、`loginError` 为空（NapCat issue #2135）。
+   * NapCat 4.18.42 起读取 `NAPCAT_QQ_DATA_DIR`，设置后注入 QQ 的数据目录被隔离。
+   *
+   * 该变量要穿过 UAC 提权，所以同时做两件事：写用户级持久变量（提权进程从用户配置读），
+   * 以及把变量放进子进程环境（不提权的路径直接生效）。
+   */
+  async function napcatLaunch() {
+    const { s, installDir, dataDir, paths } = napcatPathsNow()
     if (napcatProc !== null) throw new Error('NapCat 已经由本插件启动过了（先 action:"stop"）')
 
     // 守卫一：启动文件缺失。有 launcher 脚本就能启动；没有则要求引导器与 hook 都在。
@@ -2716,6 +2775,14 @@ export function apply(ctx, config) {
     const subprocess = ctx.get('subprocess')
     if (!subprocess) throw new Error('这个 profile 没有 subprocess 服务，无法启动 NapCat')
 
+    // 守卫三：隔离数据目录必须先建好。NapCat 会在它下面建 cache/config/data/logs/temp。
+    try {
+      mkdirSync(dataDir, { recursive: true })
+    } catch (error) {
+      throw new Error(`建不了 NapCat 隔离数据目录：${dataDir}（${error?.message ?? error}）`)
+    }
+    const envPersisted = await persistDataDirEnv(subprocess, dataDir)
+
     // **不传 `-q`**：`-q <QQ号>` 是快速登录，它需要本机已经有一次成功登录留下的凭证。
     // 没有凭证时带 `-q` 启动，QQ 走快速登录会失败，登录界面根本起不来 —— 真机现象：
     // WebUI 里账号列表为空、二维码空白、密码登录报「功能未初始化」，OneBot 端口始终不开。
@@ -2726,14 +2793,16 @@ export function apply(ctx, config) {
     let mode
 
     if (paths.launcherBat !== '') {
-      // 优先走官方 launcher：它自己按注册表找 QQ 路径，也在非管理员时用 UAC 自我提权。
+      // 由插件自己发起提权，提权目标是 cmd：cmd 里跑官方 launcher 脚本。
       // 因此这里只传 bat，**不传 QQ 路径、hook 与额外参数**（bat 内部自己拼）。
-      // 提权交给 bat 自己做：4.18.37 起它用自带的 launcher-elevate.ps1，所以提权窗口是 PowerShell。
-      // 曾试过由插件自己提权到 cmd 来避开 PS 窗口，真机上出现控制台最小化、登录核心没就绪
-      // （WebUI 报 coreReady:false、二维码为空），所以回到这条已经验证过的路径。
-      argv = [process.env.COMSPEC || 'cmd.exe', '/c', paths.launcherBat]
+      // 提权窗口是 cmd，不是 bat 自带 launcher-elevate.ps1 起的 PowerShell 窗口。
+      const q = (p) => `'${String(p).replace(/'/g, "''")}'`
+      const cmdLine =
+        `Start-Process -FilePath ${q(process.env.COMSPEC || 'cmd.exe')} ` +
+        `-ArgumentList '/c',${q(paths.launcherBat)} -WorkingDirectory ${q(paths.shellDir)} -Verb RunAs`
+      argv = ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmdLine]
       launched = paths.launcherBat
-      mode = 'launcher-bat'
+      mode = 'launcher-cmd-elevated'
     } else {
       // 没有 launcher 脚本时直接调引导器：argv 必须是 <bootMain> <QQ.exe> <hook.dll>。
       const qq = detectQq()
@@ -2757,6 +2826,8 @@ export function apply(ctx, config) {
       // （含 WebUI 随机 token）出现在 DSH 宿主的控制台上。
       stdio: { stdin: 'ignore', stdout: 'inherit', stderr: 'inherit' },
       graceMs: 8000,
+      // 不提权的路径直接吃这份环境；提权的路径靠上面那条用户级持久变量。
+      env: { [DATA_DIR_ENV]: dataDir },
     })
     napcatProc = handle
     const clear = (why) => {
@@ -2768,14 +2839,21 @@ export function apply(ctx, config) {
     return {
       launched,
       mode,
+      installDir,
+      dataDir,
+      envPersisted,
       qqNumber: s.qqNumber || '(未设置)',
       notes: [
-        mode === 'launcher-bat'
-          ? '走官方 launcher 脚本：它会在需要时用 UAC 自我提权，提权窗口是 PowerShell（NapCat 自带的 launcher-elevate.ps1），请在系统弹窗里点“是”。'
-          : '直接调用 NapCatWinBootMain.exe（没找到官方 launcher 脚本）。',
-        '启动不传 `-q`：由 NapCat 走扫码登录；成功登录一次后它会自己保管凭证，之后不用反复扫码。',
-        'NapCat 的 WebUI 地址与随机 token 会打在它的控制台输出里，也可读 config/webui.json。',
-        '⚠️ 提权启动的进程不在 DSH 的 subprocess 托管之下：插件卸载或 DSH 退出不会结束它，需要手动关控制台窗口。',
+        mode === 'launcher-cmd-elevated'
+          ? '由插件直接提权，提权目标是 cmd；在系统弹窗里点“是”后，cmd 窗口里跑官方 launcher 脚本。'
+          : '直接调用 NapCatWinBootMain.exe（没找到官方 launcher 脚本），由本插件直接起进程。',
+        `数据目录已隔离：${dataDir}（环境变量 ${DATA_DIR_ENV}）。该目录隔离了桌面版 QQ 的数据，登录核心才能就绪。`,
+        envPersisted
+          ? `用户级持久变量 ${DATA_DIR_ENV} 已写入，提权进程也能读到。`
+          : `用户级持久变量 ${DATA_DIR_ENV} 没写成（见 warn 日志），只有本次子进程环境里带着这个变量；提权后可能读不到。`,
+        '启动不传 `-q`：由 NapCat 走扫码登录；成功登录一次后 NapCat 自己保管凭证，之后不用反复扫码。',
+        `NapCat 的 WebUI 地址与随机 token 会打在 NapCat 的控制台输出里，也可读 ${join(dataDir, 'NapCat', 'config', 'webui.json')}。`,
+        '⚠️ 提权启动的进程不在 DSH 的 subprocess 托管之下：插件卸载或 DSH 退出不会结束该进程。需要手动关控制台窗口。',
       ],
     }
   }
@@ -2797,14 +2875,18 @@ export function apply(ctx, config) {
   /**
    * 读 NapCat 的 WebUI 地址（`<configDir>/webui.json`）。
    *
-   * configDir 的取法与 napcatConfigure 一致：安装目录里没有 `config/` 时，用 QQ 那边已有的那个。
+   * configDir 的取法与 napcatConfigure 一致：隔离数据目录里没有 `webui.json` 时，
+   * 才用安装目录或 QQ 那边已有的那个。
    * 返回值里**只有布尔量**说明 token 有没有；token 本身只拼进 webuiUrl，绝不写日志。
    */
   function readNapcatWebui() {
     const s = readSettings()
     const installDir = s.napcatInstallDir || defaultInstallDir(home)
-    const hit = configDirCandidates({ installDir, qqPath: null }).find((c) => c.hasWebUi === true)
-    const configDir = hit ? hit.dir : napcatPaths(installDir).configDir
+    const dataDir = napcatDataDirOf(s, installDir)
+    const hit = configDirCandidates({ installDir, qqPath: null, dataDir }).find((c) => c.hasWebUi === true)
+    const configDir = hit
+      ? hit.dir
+      : pickWriteConfigDir({ candidates: [], dataDir, fallback: napcatPaths(installDir).configDir })
     let cfg
     try {
       const parsed = JSON.parse(readFileSync(join(configDir, 'webui.json'), 'utf8'))
@@ -2882,10 +2964,10 @@ export function apply(ctx, config) {
         ],
         [
           '/api/qq-bridge/napcat/launch',
-          napcatRoute('POST', () => {
+          napcatRoute('POST', async () => {
             // 已在运行时不重复启动：外部启动的 NapCat 也走这条判据。
             if (napcatRunning().running) return { ok: false, error: 'NapCat 已在运行，未重复启动' }
-            const result = napcatLaunch()
+            const result = await napcatLaunch()
             return { ...result, ok: true, message: `已启动 NapCat：${result.launched}` }
           }),
         ],
@@ -2946,7 +3028,7 @@ export function apply(ctx, config) {
           case 'configure':
             return JSON.stringify(await napcatConfigure(args), null, 2)
           case 'launch':
-            return JSON.stringify(napcatLaunch(), null, 2)
+            return JSON.stringify(await napcatLaunch(), null, 2)
           case 'stop':
             return JSON.stringify(await napcatStop(), null, 2)
           default:

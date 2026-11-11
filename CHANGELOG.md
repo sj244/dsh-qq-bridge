@@ -19,6 +19,23 @@
   先只按 `replyMode` 判（改出站字数上限不生效），再是正文加了一句措辞而签名没跟着变
   （改文案不生效）。改文案也要重启一次才生效，这一点很难被发现。
   现在直接比 `buildUsagePrompt()` 的输出，设置与文案任何一处变了都会重挂，不必再维护签名的键清单。
+- **NapCat 启动隔离 QQ 数据目录**（真机修复）：NapCat 注入的那份 QQ 会按注册表
+  `HKLM\SOFTWARE\WOW6432Node\Tencent\QQNT` 的 `Install=` 找到桌面版 QQ 的数据目录并共用。
+  共用时 QQ 内核不触发初始化回调，登录核心永远不就绪（NapCat issue #2135）：WebUI 可打开、
+  报 `coreReady:false`、无二维码、OneBot 端口不监听、`loginError` 为空。
+  NapCat 4.18.42 起支持环境变量 `NAPCAT_QQ_DATA_DIR`（4.18.37 不支持）。`launch` 现在先建数据目录，
+  再用 `setx` 把变量写进用户级持久环境变量（`HKCU\Environment`）：只设在启动进程的环境里，
+  经 `Start-Process -Verb RunAs` 提权后会丢失。变量同时进子进程 `env`，覆盖不提权的路径。
+  写持久变量失败只记 warn，不阻断启动。
+- **新增设置项 `napcatDataDir`**：NapCat 隔离数据目录，默认空 = `<安装目录>/qqdata`。
+  界面卡片、`Config`、`BridgeSettings` 三处都加了 `napcatDataDir`；`status` 与 `configure` 的返回值都报告实际路径。
+- **配置目录跟着搬到隔离数据目录**：`configDirCandidates()` 现在接收 `dataDir`，把
+  `<dataDir>/NapCat/config` 排在最高优先级，其后才是安装目录的候选。新增 `napcatDataDirOf()` 与
+  `pickWriteConfigDir()`：`napcatConfigure` 写到隔离目录（NapCat 只读那里），
+  `napcatStatus` 与卡片上的 WebUI 读取也按同一顺序。
+- **启动改为插件自己提权到 cmd**：不再用 `cmd /c` 让 bat 自己提权（会多一个 PowerShell 窗口）。
+  现在由插件调 `powershell.exe -Command Start-Process … -Verb RunAs` 起提权的 `cmd.exe`，
+  在 cmd 里跑官方 launcher。启动仍然不传 `-q`。
 
 ## v0.1.3 — 2026-10-10
 
