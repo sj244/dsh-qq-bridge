@@ -141,7 +141,7 @@ window.__ModuleLoader__.load({
       { key: 'napcatVersion', label: 'NapCat 版本', kind: 'text', hint: '要下载的版本 tag（如 v4.18.28）；留空 = 最新。' },
       { key: 'downloadProxy', label: '下载代理', kind: 'text', hint: '下载 NapCat 用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量。' },
       { key: 'onebotPort', label: 'OneBot 端口', kind: 'number', hint: '写进 NapCat 配置、并用来连的正向 WS 端口。' },
-      { key: 'qqNumber', label: '快速登录 QQ', kind: 'text', hint: '快速登录用的 QQ 号（需先成功登录过一次）。' },
+      { key: 'qqNumber', label: '机器人 QQ 号', kind: 'text', hint: '仅用于配置与显示；启动不传 -q，由 NapCat 走扫码登录。' },
     ]
 
     function format(field, raw) {

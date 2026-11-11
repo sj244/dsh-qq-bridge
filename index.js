@@ -135,7 +135,7 @@ export const Config = Schema.object({
   napcatAsset: Schema.string().default(DEFAULT_ASSET).description('要下载的发行资产名。'),
   downloadProxy: Schema.string().default('').description('下载用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
   onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
-  qqNumber: Schema.string().default('').description('快速登录用的 QQ 号（需先成功登录过一次）。'),
+  qqNumber: Schema.string().default('').description('机器人自己的 QQ 号，仅用于配置与显示；启动不再传 -q，由扫码登录。'),
   // 以下是 settings 命名空间的 composition base（装好的默认值）：
   // 设置界面里的用户层会覆盖它们。
   nicknames: Schema.array(Schema.string()).default(['244']),
@@ -174,7 +174,7 @@ const BridgeSettings = Schema.object({
   napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本 tag（如 v4.18.28）；留空 = 最新。'),
   downloadProxy: Schema.string().default('').description('下载 NapCat 用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
   onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
-  qqNumber: Schema.string().default('').description('快速登录用的 QQ 号（需先成功登录过一次）。'),
+  qqNumber: Schema.string().default('').description('机器人自己的 QQ 号，仅用于配置与显示；启动不再传 -q，由扫码登录。'),
 })
 
 /** OneBot 非文本消息段 → 可读占位符。
@@ -2716,20 +2716,26 @@ export function apply(ctx, config) {
     const subprocess = ctx.get('subprocess')
     if (!subprocess) throw new Error('这个 profile 没有 subprocess 服务，无法启动 NapCat')
 
-    // 额外参数：NapCat 的快速登录用 `-q <QQ号>`。未设置 QQ 号时不传，由用户手动扫码。
-    const qqArgs = s.qqNumber !== '' ? ['-q', s.qqNumber] : []
+    // **不传 `-q`**：`-q <QQ号>` 是快速登录，它需要本机已经有一次成功登录留下的凭证。
+    // 没有凭证时带 `-q` 启动，QQ 走快速登录会失败，登录界面根本起不来 —— 真机现象：
+    // WebUI 里账号列表为空、二维码空白、密码登录报「功能未初始化」，OneBot 端口始终不开。
+    // 不带参数启动则由 NapCat 走扫码登录；成功登录一次之后它会自己保管凭证。
+    // `qqNumber` 保留给配置与状态显示，不再影响启动参数。
     let argv
     let launched
     let mode
 
     if (paths.launcherBat !== '') {
       // 优先走官方 launcher：它自己按注册表找 QQ 路径，也在非管理员时用 UAC 自我提权。
-      // 因此这里只传 bat 与额外参数，**不传 QQ 路径与 hook**（bat 内部自己拼）。
-      argv = [process.env.COMSPEC || 'cmd.exe', '/c', paths.launcherBat, ...qqArgs]
+      // 因此这里只传 bat，**不传 QQ 路径、hook 与额外参数**（bat 内部自己拼）。
+      // 提权交给 bat 自己做：4.18.37 起它用自带的 launcher-elevate.ps1，所以提权窗口是 PowerShell。
+      // 曾试过由插件自己提权到 cmd 来避开 PS 窗口，真机上出现控制台最小化、登录核心没就绪
+      // （WebUI 报 coreReady:false、二维码为空），所以回到这条已经验证过的路径。
+      argv = [process.env.COMSPEC || 'cmd.exe', '/c', paths.launcherBat]
       launched = paths.launcherBat
       mode = 'launcher-bat'
     } else {
-      // 没有 launcher 脚本时直接调引导器：argv 必须是 <bootMain> <QQ.exe> <hook.dll> [额外参数]。
+      // 没有 launcher 脚本时直接调引导器：argv 必须是 <bootMain> <QQ.exe> <hook.dll>。
       const qq = detectQq()
       if (!qq.primary) {
         throw new Error(
@@ -2738,7 +2744,7 @@ export function apply(ctx, config) {
             'launcher 自己会读注册表找 QQ 路径。',
         )
       }
-      argv = [paths.bootMain, qq.primary, paths.hookDll, ...qqArgs]
+      argv = [paths.bootMain, qq.primary, paths.hookDll]
       launched = paths.bootMain
       mode = 'bootmain'
     }
@@ -2762,14 +2768,14 @@ export function apply(ctx, config) {
     return {
       launched,
       mode,
-      qqNumber: s.qqNumber || '(未设置 → 需要你手动扫码登录一次)',
+      qqNumber: s.qqNumber || '(未设置)',
       notes: [
         mode === 'launcher-bat'
-          ? '走官方 launcher 脚本：它可能弹 UAC 提权窗口，请在系统弹窗里点“是”。'
+          ? '走官方 launcher 脚本：它会在需要时用 UAC 自我提权，提权窗口是 PowerShell（NapCat 自带的 launcher-elevate.ps1），请在系统弹窗里点“是”。'
           : '直接调用 NapCatWinBootMain.exe（没找到官方 launcher 脚本）。',
-        '首次登录必须手动（扫码/密码），NapCat 官方也要求「登录过一次」才能用 QQ 号快速登录。',
+        '启动不传 `-q`：由 NapCat 走扫码登录；成功登录一次后它会自己保管凭证，之后不用反复扫码。',
         'NapCat 的 WebUI 地址与随机 token 会打在它的控制台输出里，也可读 config/webui.json。',
-        '⚠️ 这个进程由 DSH 的 subprocess 服务托管：插件被卸载或 DSH 退出时会一并结束。',
+        '⚠️ 提权启动的进程不在 DSH 的 subprocess 托管之下：插件卸载或 DSH 退出不会结束它，需要手动关控制台窗口。',
       ],
     }
   }
