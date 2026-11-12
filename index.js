@@ -2783,28 +2783,36 @@ export function apply(ctx, config) {
     }
     const envPersisted = await persistDataDirEnv(subprocess, dataDir)
 
-    // **不传 `-q`**：`-q <QQ号>` 是快速登录，它需要本机已经有一次成功登录留下的凭证。
-    // 没有凭证时带 `-q` 启动，QQ 走快速登录会失败，登录界面根本起不来 —— 真机现象：
-    // WebUI 里账号列表为空、二维码空白、密码登录报「功能未初始化」，OneBot 端口始终不开。
-    // 不带参数启动则由 NapCat 走扫码登录；成功登录一次之后它会自己保管凭证。
-    // `qqNumber` 保留给配置与状态显示，不再影响启动参数。
+    // `-q <QQ号>` 是快速登录：NapCat 用本机已有的登录记录直接登录，不必扫码。
+    //
+    // 只在 `qqNumber` 是一个像样的号码时传。号码不对时 NapCat 的启动分支是
+    // “找不到该 QQ 的历史登录记录 → 试密码回退 → 都没有就出二维码”，所以传错的代价
+    // 只是多打一行错误日志，不会挡住扫码登录（4.18.42 的 napcat.mjs）。
+    //
+    // ⚠️ 早前真机上带 `-q` 起不来（WebUI 账号列表为空、二维码空白、OneBot 端口不开），
+    //    当时的真因是数据目录与桌面版 QQ 共用（issue #2135），不是 `-q` 本身；
+    //    隔离数据目录之后这条路径才可用。
+    const quickUin = /^\d{5,12}$/.test(String(s.qqNumber ?? '').trim()) ? String(s.qqNumber).trim() : ''
+    const loginArgs = quickUin === '' ? [] : ['-q', quickUin]
+
     let argv
     let launched
     let mode
 
     if (paths.launcherBat !== '') {
       // 由插件自己发起提权，提权目标是 cmd：cmd 里跑官方 launcher 脚本。
-      // 因此这里只传 bat，**不传 QQ 路径、hook 与额外参数**（bat 内部自己拼）。
+      // 因此这里只传 bat 与登录参数，**不传 QQ 路径与 hook**（bat 内部自己拼）。
       // 提权窗口是 cmd，不是 bat 自带 launcher-elevate.ps1 起的 PowerShell 窗口。
       const q = (p) => `'${String(p).replace(/'/g, "''")}'`
+      const inner = loginArgs.length === 0 ? paths.launcherBat : `${paths.launcherBat} ${loginArgs.join(' ')}`
       const cmdLine =
         `Start-Process -FilePath ${q(process.env.COMSPEC || 'cmd.exe')} ` +
-        `-ArgumentList '/c',${q(paths.launcherBat)} -WorkingDirectory ${q(paths.shellDir)} -Verb RunAs`
+        `-ArgumentList '/c',${q(inner)} -WorkingDirectory ${q(paths.shellDir)} -Verb RunAs`
       argv = ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmdLine]
       launched = paths.launcherBat
       mode = 'launcher-cmd-elevated'
     } else {
-      // 没有 launcher 脚本时直接调引导器：argv 必须是 <bootMain> <QQ.exe> <hook.dll>。
+      // 没有 launcher 脚本时直接调引导器：argv 必须是 <bootMain> <QQ.exe> <hook.dll> [登录参数]。
       const qq = detectQq()
       if (!qq.primary) {
         throw new Error(
@@ -2813,7 +2821,7 @@ export function apply(ctx, config) {
             'launcher 自己会读注册表找 QQ 路径。',
         )
       }
-      argv = [paths.bootMain, qq.primary, paths.hookDll]
+      argv = [paths.bootMain, qq.primary, paths.hookDll, ...loginArgs]
       launched = paths.bootMain
       mode = 'bootmain'
     }
@@ -2843,6 +2851,7 @@ export function apply(ctx, config) {
       dataDir,
       envPersisted,
       qqNumber: s.qqNumber || '(未设置)',
+      quickLogin: quickUin === '' ? 'off' : quickUin,
       notes: [
         mode === 'launcher-cmd-elevated'
           ? '由插件直接提权，提权目标是 cmd；在系统弹窗里点“是”后，cmd 窗口里跑官方 launcher 脚本。'
@@ -2851,7 +2860,10 @@ export function apply(ctx, config) {
         envPersisted
           ? `用户级持久变量 ${DATA_DIR_ENV} 已写入，提权进程也能读到。`
           : `用户级持久变量 ${DATA_DIR_ENV} 没写成（见 warn 日志），只有本次子进程环境里带着这个变量；提权后可能读不到。`,
-        '启动不传 `-q`：由 NapCat 走扫码登录；成功登录一次后 NapCat 自己保管凭证，之后不用反复扫码。',
+        quickUin === ''
+          ? '启动不传 `-q`（`qqNumber` 未配置或不是号码）：由 NapCat 走扫码登录。'
+          : `启动带 \`-q ${quickUin}\`（快速登录）：用本机已有的登录记录直接登录，不必扫码；` +
+            '登录记录不存在时 NapCat 自己退回扫码，不会卡住。',
         `NapCat 的 WebUI 地址与随机 token 会打在 NapCat 的控制台输出里，也可读 ${join(dataDir, 'NapCat', 'config', 'webui.json')}。`,
         '⚠️ 提权启动的进程不在 DSH 的 subprocess 托管之下：插件卸载或 DSH 退出不会结束该进程。需要手动关控制台窗口。',
       ],

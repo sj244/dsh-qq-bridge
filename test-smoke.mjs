@@ -73,6 +73,8 @@ let lastResumeOptions = null
 // “描述缓存命中”用例会塞这两个：假 attachments + 假 llm（统计多模态调用次数）
 let fakeAttachments = null
 let fakeLlm = null
+// 启动参数用例会塞这个：假 subprocess，只记 spawn 的 argv
+let fakeSubprocess = null
 let visionStreamCalls = 0
 /** 宿主半挂出来的 HTTP 路由（webServer 假实现收集用）。 */
 const capturedRoutes = []
@@ -101,6 +103,7 @@ const ctx = {
     if (name === 'sessionQuery') return fakeSessionQuery
     if (name === 'attachments') return fakeAttachments
     if (name === 'llm') return fakeLlm
+    if (name === 'subprocess') return fakeSubprocess
     return undefined
   },
 }
@@ -259,6 +262,44 @@ if (sim) {
   check('未知 action 返回错误而非抛异常', typeof bad.error === 'string', bad.error)
   const cannotLaunch = JSON.parse(await nap.execute({ action: 'launch' }))
   check('未安装时 launch 明确报错', typeof cannotLaunch.error === 'string' && cannotLaunch.error.includes('download'), cannotLaunch.error)
+
+  // ★ 启动参数：配了 qqNumber 就带 `-q <号>`（快速登录），没配就不带。
+  //   两条分支都要断言，否则“加了 -q”这种改动没有任何用例拦得住。
+  const launchDir = mkdtempSync(join(tmpdir(), 'qq-bridge-launch-'))
+  writeFileSync(join(launchDir, 'launcher-win10.bat'), '@echo off\r\n')
+  const spawns = []
+  fakeSubprocess = {
+    resolveExecutable: async (n) => n,
+    spawn: (spec) => {
+      spawns.push(spec)
+      return { done: Promise.resolve({ exitCode: 0, signal: null }), collected: {}, terminate() {}, waitForExit: async () => {} }
+    },
+  }
+  const settingsBefore = resolvedSettings
+  const launchArgv = () =>
+    spawns
+      .filter((sp) => sp.argv[0] === 'powershell.exe')
+      .map((sp) => sp.argv.join(' '))
+      .pop() ?? ''
+
+  resolvedSettings = { ...settingsBefore, napcatInstallDir: launchDir, qqNumber: '3082276036' }
+  const withUin = JSON.parse(await nap.execute({ action: 'launch' }))
+  check('配了 qqNumber：launch 报快速登录号', withUin.quickLogin === '3082276036', JSON.stringify(withUin.quickLogin))
+  check('配了 qqNumber：命令行带 `-q <号>`', launchArgv().includes('-q 3082276036'), launchArgv().slice(-120))
+  check('配了 qqNumber：仍然走 cmd 提权启动', withUin.mode === 'launcher-cmd-elevated', String(withUin.mode))
+  check('启动时导出隔离数据目录', spawns.length > 1 && spawns[spawns.length - 1].env?.NAPCAT_QQ_DATA_DIR === join(launchDir, 'qqdata'), JSON.stringify(spawns.at(-1)?.env ?? {}))
+
+  // napcatProc 是模块级状态：上一次启动要等 done 结算后才清空
+  await new Promise((r) => setTimeout(r, 20))
+  resolvedSettings = { ...settingsBefore, napcatInstallDir: launchDir, qqNumber: '' }
+  const noUin = JSON.parse(await nap.execute({ action: 'launch' }))
+  check('没配 qqNumber：launch 报 off', noUin.quickLogin === 'off', JSON.stringify(noUin.quickLogin))
+  check('没配 qqNumber：命令行不带 `-q`', !launchArgv().includes('-q '), launchArgv().slice(-120))
+
+  await new Promise((r) => setTimeout(r, 20))
+  fakeSubprocess = null
+  resolvedSettings = settingsBefore
+  rmSync(launchDir, { recursive: true, force: true })
 }
 
 // 出站闸门：默认只发 [QQ]…[/QQ] 里的内容（否则整轮技术说明都会倒进群里）

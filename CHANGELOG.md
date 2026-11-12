@@ -35,7 +35,12 @@
   `napcatStatus` 与卡片上的 WebUI 读取也按同一顺序。
 - **启动改为插件自己提权到 cmd**：不再用 `cmd /c` 让 bat 自己提权（会多一个 PowerShell 窗口）。
   现在由插件调 `powershell.exe -Command Start-Process … -Verb RunAs` 起提权的 `cmd.exe`，
-  在 cmd 里跑官方 launcher。启动仍然不传 `-q`。
+  在 cmd 里跑官方 launcher。
+- **启动重新带上 `-q <QQ号>`（快速登录）**：`launch` 在 `qqNumber` 是一个像样的号码时传 `-q <号>`，
+  由 NapCat 用本机已有的登录记录直接登录，不必扫码。没有登录记录也不会卡住：
+  4.18.42 的启动分支是「找不到该号的历史记录 → 试密码回退 → 都没有就出二维码」。
+  早前真机带 `-q` 起不来的真因是数据目录与桌面版 QQ 共用（issue #2135），不是 `-q` 本身。
+  返回值的 `quickLogin` 报告实际传了什么（未传时为 `off`）。
 
 ## v0.1.3 — 2026-10-10
 
